@@ -11,6 +11,7 @@ numpy==2.3.4
     #   vasav-at-work (pyproject.toml)
     #   pandas
     #   pdtable
+    #   scipy
 openpyxl==3.1.5
     # via vasav-at-work (pyproject.toml)
 packaging==25.0
@@ -35,6 +36,8 @@ pytz==2025.2
     # via
     #   vasav-at-work (pyproject.toml)
     #   pandas
+scipy==1.16.3
+    # via vasav-at-work (pyproject.toml)
 six==1.17.0
     # via
     #   vasav-at-work (pyproject.toml)

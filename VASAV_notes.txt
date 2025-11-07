@@ -1,0 +1,19 @@
+link to uv python package installer:
+https://robert-mcdermott.medium.com/saying-goodbye-to-anaconda-91c18ddf89bb
+
+Create a uv  virtual environment
+1. open windows powershell
+2. cd C:\Users\vasav\PyCharmProjects\VASAV-at-work (i.e. to your project)
+3. create a .venv folder: uv venv .venv
+4. add interpreter
+5. use uv to handle packages
+    this creates the requirements.txt: uv pip compile pyproject.toml -o requirements.txt
+    this is what someone should do to download all these packages: uv add -r requirements.txt
+
+
+add a package with  uv
+1. open windows powershell
+2. cd C:\Users\vasav\PyCharmProjects\VASAV-at-work (i.e. to your project)
+3. uv add package name ---->this downloads teh package and adds it in the toml file
+4. uv pip compile pyproject.toml -o requirements.txt --> this updates the requirements.txt file
+
