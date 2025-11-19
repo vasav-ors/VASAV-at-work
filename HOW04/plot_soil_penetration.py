@@ -7,13 +7,14 @@ import plotly.express as px
 
 path_fou_type = Path(r'k:\dozr\HOW04\WTG_MP\07_GEO\02_Driveability\20250130 L286\WorkingFolder\L286_FoundationTypeWithMonopileRisk - BE.xlsx')
 path = r"K:\dozr\HOW04\WTG_MP\05_PS\20250514 BAFO DELIVERABLES\02 All positions\01 Without PICASO imitation\summary\data_summary\summary-root.xls"
+#new comment
 
 sheets = pd.read_excel(path, sheet_name=["Summary ..", "GEO stratigraphy"])
 fou_type_data = pd.read_excel(path_fou_type)
 
 #vasav comment
 # manipulate Summary ..
-sheet = sheets["Summary .."]
+sheet  = sheets["Summary .."]
 headers1 = sheet.iloc[5,:].fillna('').values
 headers2 = sheet.iloc[6,:].values
 headers = [f'{h2}' if h1 == '' else f'{h1}: {h2}' for h1, h2 in zip(headers1, headers2)]
