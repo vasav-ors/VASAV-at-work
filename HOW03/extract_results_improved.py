@@ -651,9 +651,9 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                                     depth_cross = d1 + (mp_lift_tool_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
                                 else:
                                     depth_cross = current_depth
-                                pile_run_at_hammer_placement[bound_key] = f'{depth_cross:.2f}'
                             else:
-                                pile_run_at_hammer_placement[bound_key] = f'{current_depth:.2f}'
+                                depth_cross = current_depth
+                            pile_run_at_hammer_placement[bound_key] = f'{depth_cross:.2f}'
                             found_risk = True
                             break
 
@@ -728,15 +728,35 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                             break
                 if not found_risk:
                     pile_run_risk_top[bound_key] = 'No risk'
-    # --- Build dynamic table columns and values ---
-    table_headers = []
-    table_columns = []
-    for method in selected_methods:
-        for bound in selected_bounds:
-            table_headers.append(f'<b>{method} {bound.upper()}</b>')
-            table_columns.append([intersection_depths.get((method, bound), '')] + ['']*4)
-    # Table rows
-    table_row_labels = ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>']
+    # --- Find depth for pile run risk bottom for each bound ---
+    pile_run_risk_bottom = {'LB': '', 'BE': '', 'UB': ''}
+    if mp_weight is not None:
+        mp_hammer_total_weight_kn = (nominal_mp_weight + HAMMER_WEIGHT) * 9.81
+        for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
+            rut_kn = rut * 1000
+            bound_key = bound.upper()
+            # Get numeric value for pile run risk top
+            risk_top_str = pile_run_risk_top.get(bound_key, None)
+            if risk_top_str == 'No risk':
+                pile_run_risk_bottom[bound_key] = 'N/A'
+                continue
+            try:
+                risk_top = float(risk_top_str) if risk_top_str else None
+            except Exception:
+                risk_top = None
+            if risk_top is not None:
+                # Find first index deeper than risk_top
+                for i in range(len(depth)):
+                    if depth[i] > risk_top:
+                        # Check if all remaining SRD values are above threshold
+                        all_above = all(r > mp_hammer_total_weight_kn for r in rut_kn[i:])
+                        if all_above:
+                            pile_run_risk_bottom[bound_key] = f'{depth[i]:.2f}'
+                            break
+                if pile_run_risk_bottom[bound_key] == '':
+                    pile_run_risk_bottom[bound_key] = 'No bottom'
+            else:
+                pile_run_risk_bottom[bound_key] = ''
     # --- Create table ---
     weight_table = go.Table(
         header=dict(
@@ -748,9 +768,9 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         cells=dict(
             values=[
                 ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>'],
-                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], swp_mp_hammer_depths['LB'], pile_run_risk_top['LB'], ''],  # LB column
-                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], swp_mp_hammer_depths['BE'], pile_run_risk_top['BE'], ''],  # BE column
-                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], pile_run_risk_top['UB'], '']   # UB column
+                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], swp_mp_hammer_depths['LB'], pile_run_risk_top['LB'], pile_run_risk_bottom['LB']],  # LB column
+                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], swp_mp_hammer_depths['BE'], pile_run_risk_top['BE'], pile_run_risk_bottom['BE']],  # BE column
+                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], pile_run_risk_top['UB'], pile_run_risk_bottom['UB']]   # UB column
             ],
             fill_color='white',
             align=['left', 'center', 'center', 'center'],
