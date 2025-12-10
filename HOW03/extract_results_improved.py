@@ -38,7 +38,7 @@ MONOPILE_ROOT_DIR = Path(r"K:/DOZR/HOW03/GEO/05_Driveability/20241108_Cleaned_Co
 # USER DEFINED CONSTANT FOR OUTPUT DIRECTORY WHERE PLOTS ARE SAVED
 PLOTS_OUTPUT_DIR = MONOPILE_ROOT_DIR / "plots"
 
-x
+
 # -----------------------------------
 
 
@@ -660,6 +660,43 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 # If no risk found, report "No risk"
                 if not found_risk:
                     pile_run_at_hammer_placement[bound_key] = 'No risk'
+    # --- Find depth for SWP MP + Hammer for each bound ---
+    swp_mp_hammer_depths = {'LB': '', 'BE': '', 'UB': ''}
+    swp_mp_hammer_depths_numeric = {'LB': None, 'BE': None, 'UB': None}
+    if mp_weight is not None:
+        mp_hammer_total_weight_kn = (nominal_mp_weight + HAMMER_WEIGHT) * 9.81
+        for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
+            rut_kn = rut * 1000
+            bound_key = bound.upper()
+            # Get numeric values of first two rows
+            depth1 = swp_mp_ilt_depths_numeric.get(bound_key, None)
+            depth2 = pile_run_at_hammer_placement.get(bound_key, None)
+            try:
+                depth2_num = float(depth2) if depth2 and depth2 != 'No risk' else None
+            except Exception:
+                depth2_num = None
+            # Compute max depth
+            start_depth = None
+            if depth1 is not None and depth2_num is not None:
+                start_depth = max(depth1, depth2_num)
+            elif depth1 is not None:
+                start_depth = depth1
+            elif depth2_num is not None:
+                start_depth = depth2_num
+            # Find first crossing after start_depth
+            if start_depth is not None:
+                for i in range(1, len(rut_kn)):
+                    if depth[i] > start_depth:
+                        if (rut_kn[i-1] < mp_hammer_total_weight_kn <= rut_kn[i]) or (rut_kn[i-1] > mp_hammer_total_weight_kn >= rut_kn[i]):
+                            d1, d2 = depth[i-1], depth[i]
+                            r1, r2 = rut_kn[i-1], rut_kn[i]
+                            if r2 != r1:
+                                depth_cross = d1 + (mp_hammer_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
+                            else:
+                                depth_cross = d1
+                            swp_mp_hammer_depths[bound_key] = f'{depth_cross:.2f}'
+                            swp_mp_hammer_depths_numeric[bound_key] = depth_cross
+                            break
     # --- Build dynamic table columns and values ---
     table_headers = []
     table_columns = []
@@ -680,9 +717,9 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         cells=dict(
             values=[
                 ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>'],
-                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], '', '', ''],  # LB column
-                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], '', '', ''],  # BE column
-                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], '', '', '']   # UB column
+                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], swp_mp_hammer_depths['LB'], '', ''],  # LB column
+                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], swp_mp_hammer_depths['BE'], '', ''],  # BE column
+                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], '', '']   # UB column
             ],
             fill_color='white',
             align=['left', 'center', 'center', 'center'],
@@ -927,7 +964,7 @@ def main():
     """Main execution function"""
 
     # Set the root directory
-    root_dir = Path(r"K:\DOZR\HOW03\GEO\05_Driveability\20241108_Cleaned_Const_blow\variations\const_blow_0.25m_intrvl_200bl_limit\monopiles")
+    root_dir = MONOPILE_ROOT_DIR
 
     # Fallback to local directory if network path is unavailable
     if not root_dir.exists():
