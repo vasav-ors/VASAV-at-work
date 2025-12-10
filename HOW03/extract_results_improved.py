@@ -26,10 +26,17 @@ from plotly.subplots import make_subplots
 HARD_DRIVING_BLOWCOUNT = 75  # e.g. 80 bl/25cm
 REFUSAL_BLOWCOUNT = 250      # e.g. 180 bl/25cm
 INTERNAL_LIFTING_TOOL = 100 # weight of internal lifting tool in t
-HAMMER_WEIGHT = 739 # weight of hammer in t
+HAMMER_WEIGHT = 736 # weight of hammer in t
+ADDITIONAL_WEIGHT = 20 # any additional weight in MP like flange and pins for secondary attachments int
 
 # USER DEFINED CONSTANT FOR MONOPILE WEIGHTS FILE
 MONOPILE_WEIGHTS_FILE = r"C:/Users/vasav/PyCharmProjects/VASAV-at-work/HOW03/summary-01_Primary_Steel_Design_Verification_25yr.xls"
+
+# USER DEFINED CONSTANT FOR MONOPILE ROOT DIRECTORY
+MONOPILE_ROOT_DIR = Path(r"K:/DOZR/HOW03/GEO/05_Driveability/20241108_Cleaned_Const_blow/variations/const_blow_0.25m_intrvl_200bl_limit/monopiles")
+
+# USER DEFINED CONSTANT FOR OUTPUT DIRECTORY WHERE PLOTS ARE SAVED
+PLOTS_OUTPUT_DIR = MONOPILE_ROOT_DIR / "plots"
 
 
 # -----------------------------------
@@ -259,7 +266,7 @@ def get_position_info(position_tables, position):
     return info
 
 
-def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
+def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                       selected_methods: List[str], selected_bounds: List[str],
                       output_dir: Path = None,
                       monopile_weights: dict = None,
@@ -312,6 +319,10 @@ def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
     )
     plot_count = 0
 
+    methods_to_plot = []
+    bounds_to_plot = []
+    ruts_to_plot = []
+    depths_to_plot = []
     # Plot each combination
     for table_name, df in tables.items():
         method, bound = extract_method_and_bound(table_name)
@@ -398,7 +409,7 @@ def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
         )
         # New plot: Total Energy [GJ] vs Depth [mbsb] in row 2, col 1
         fig.add_trace(
-            go.Scatter(A01
+            go.Scatter(
                 x=cumulative_input_energy,
                 y=depth,
                 mode='lines',
@@ -439,6 +450,11 @@ def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
             ),
             row=2, col=3
         )
+        # Collect for intersection calculation
+        methods_to_plot.append(method)
+        bounds_to_plot.append(bound)
+        ruts_to_plot.append(rut)
+        depths_to_plot.append(depth)
         plot_count += 1
 
     if plot_count == 0:
@@ -532,81 +548,128 @@ def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
         mp_weight = monopile_weights.get(position, None)
 
     if mp_weight is not None:
-        # Convert weights from tonnes to kN (1 tonne = 9.81 kN, approximately 10 kN for simplicity)
-        # Using 9.81 m/s² for gravity
-        mp_weight_kn = mp_weight * 9.81
+        # Calculate nominal monopile weight (MP + additional weight)
+        nominal_mp_weight = mp_weight + ADDITIONAL_WEIGHT
 
-        # Add line for MP + lifting tool weight (dashed black line)
-        mp_lifting_tool_weight_kn = (mp_weight + INTERNAL_LIFTING_TOOL) * 9.81
+        # Add line for MP + additional weight + lifting tool weight (dashed black line)
+        mp_lift_tool_total_weight_kn = (nominal_mp_weight + INTERNAL_LIFTING_TOOL) * 9.81
         fig.add_vline(
-            x=mp_lifting_tool_weight_kn,
+            x=mp_lift_tool_total_weight_kn,
             line_dash="dash",
             line_color="black",
             line_width=2,
-            annotation_text="MP+lift tool",
+            annotation_text="MP+add.+lift tool",
             annotation_position="top right",
             annotation=dict(font_size=11, font_color="black", textangle=-90),
             row=2, col=3
         )
 
-        # Add line for MP + hammer weight (solid black line)
-        mp_hammer_weight_kn = (mp_weight + HAMMER_WEIGHT) * 9.81
+        # Add line for MP + additional weight + hammer (solid black line)
+        mp_hammer_total_weight_kn = (nominal_mp_weight + HAMMER_WEIGHT) * 9.81
         fig.add_vline(
-            x=mp_hammer_weight_kn,
+            x=mp_hammer_total_weight_kn,
             line_dash="solid",
             line_color="black",
             line_width=2,
-            annotation_text="MP+hammer",
+            annotation_text="MP+add.+hammer",
             annotation_position="top right",
             annotation=dict(font_size=11, font_color="black", textangle=-90),
             row=2, col=3
         )
 
-    # ========== IMPROVED INFO PANEL: Using go.Table instead of annotation ==========
-    if mp_weight is None and monopile_weights is not None:
-        mp_weight = monopile_weights.get(position, None)
-
-    # Build info table data
-    info_params = ['Position']
-    info_values = [position]
-
+    # --- Find intersection depths for SWP MP + ILT for each method/bound ---
+    intersection_depths = {}  # (method, bound) -> depth string
     if mp_weight is not None:
-        info_params.append('Monopile weight')
-        info_values.append(f"{mp_weight:.1f} t")
+        mp_lift_tool_total_weight_kn = (nominal_mp_weight + INTERNAL_LIFTING_TOOL) * 9.81
+        for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
+            rut_kn = rut * 1000
+            for i in range(1, len(rut_kn)):
+                if (rut_kn[i-1] < mp_lift_tool_total_weight_kn <= rut_kn[i]) or (rut_kn[i-1] > mp_lift_tool_total_weight_kn >= rut_kn[i]):
+                    d1, d2 = depth[i-1], depth[i]
+                    r1, r2 = rut_kn[i-1], rut_kn[i]
+                    if r2 != r1:
+                        depth_cross = d1 + (mp_lift_tool_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
+                    else:
+                        depth_cross = d1
+                    intersection_depths[(method, bound)] = f'{depth_cross:.2f}'
+                    break
+    # --- Find intersection depths for SWP MP + ILT for each bound ---
+    swp_mp_ilt_depths = {'LB': '', 'BE': '', 'UB': ''}
+    swp_mp_ilt_depths_numeric = {'LB': None, 'BE': None, 'UB': None}  # Store numeric values for later use
+    if mp_weight is not None:
+        mp_lift_tool_total_weight_kn = (nominal_mp_weight + INTERNAL_LIFTING_TOOL) * 9.81
+        # For each plotted line in row=2, col=3, find first crossing
+        for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
+            rut_kn = rut * 1000
+            # Find first crossing
+            for i in range(1, len(rut_kn)):
+                if (rut_kn[i-1] < mp_lift_tool_total_weight_kn <= rut_kn[i]) or (rut_kn[i-1] > mp_lift_tool_total_weight_kn >= rut_kn[i]):
+                    # Linear interpolation for depth
+                    d1, d2 = depth[i-1], depth[i]
+                    r1, r2 = rut_kn[i-1], rut_kn[i]
+                    if r2 != r1:
+                        depth_cross = d1 + (mp_lift_tool_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
+                    else:
+                        depth_cross = d1
+                    if bound == 'lb':
+                        swp_mp_ilt_depths['LB'] = f'{depth_cross:.2f}'
+                        swp_mp_ilt_depths_numeric['LB'] = depth_cross
+                    elif bound == 'be':
+                        swp_mp_ilt_depths['BE'] = f'{depth_cross:.2f}'
+                        swp_mp_ilt_depths_numeric['BE'] = depth_cross
+                    elif bound == 'ub':
+                        swp_mp_ilt_depths['UB'] = f'{depth_cross:.2f}'
+                        swp_mp_ilt_depths_numeric['UB'] = depth_cross
+                    break
 
-    if position_info:
-        if position_info.get('hammer_name'):
-            info_params.append('Hammer')
-            info_values.append(position_info['hammer_name'])
-        if position_info.get('hammer_weight') is not None:
-            info_params.append('Hammer weight')
-            info_values.append(f"{position_info['hammer_weight']:.1f} t")
-        if position_info.get('target_blowcount_rate') is not None:
-            info_params.append('Target blowcount rate')
-            info_values.append(f"{position_info['target_blowcount_rate'] / 4.0:.2f} bl/25cm")
+    # --- Find depth where SRD becomes less than nominal MP + lifting tool (below SWP MP+ILT depth) ---
+    pile_run_at_hammer_placement = {'LB': '', 'BE': '', 'UB': ''}
+    if mp_weight is not None:
+        mp_lift_tool_total_weight_kn = (nominal_mp_weight + INTERNAL_LIFTING_TOOL) * 9.81
+        # For each bound, find where SRD drops below mp_lift_tool_total_weight_kn
+        for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
+            rut_kn = rut * 1000
+            bound_key = bound.upper()
 
-    # Add info table to subplot with professional styling
-    info_table = go.Table(
-        header=dict(
-            values=['<b>Parameter</b>', '<b>Value</b>'],
-            fill_color='lightblue',
-            align='left',
-            font=dict(size=14, color='black', family='Arial')
-        ),
-        cells=dict(
-            values=[info_params, info_values],
-            fill_color='white',
-            align='left',
-            font=dict(size=13, color='black', family='Arial'),
-            height=30
-        )
-    )
+            # Get the SWP MP+ILT depth for this bound
+            swp_depth = swp_mp_ilt_depths_numeric.get(bound_key, None)
 
-    fig.add_trace(info_table, row=1, col=4)
+            if swp_depth is not None:
+                # Look for first depth below swp_depth where SRD < mp_lift_tool_total_weight_kn
+                found_risk = False
+                for i in range(1, len(rut_kn)):
+                    current_depth = depth[i]
+                    # Only consider depths below the SWP MP+ILT depth
+                    if current_depth > swp_depth:
+                        # Check if SRD drops below the lifting tool threshold
+                        if rut_kn[i] < mp_lift_tool_total_weight_kn:
+                            # Linear interpolation to find exact crossing depth
+                            if i > 0 and rut_kn[i-1] >= mp_lift_tool_total_weight_kn:
+                                d1, d2 = depth[i-1], depth[i]
+                                r1, r2 = rut_kn[i-1], rut_kn[i]
+                                if r2 != r1:
+                                    depth_cross = d1 + (mp_lift_tool_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
+                                else:
+                                    depth_cross = current_depth
+                                pile_run_at_hammer_placement[bound_key] = f'{depth_cross:.2f}'
+                            else:
+                                pile_run_at_hammer_placement[bound_key] = f'{current_depth:.2f}'
+                            found_risk = True
+                            break
 
-    # Add second table below with weight configuration matrix
-    # Headers: none, LB, BE, UB
-    # Rows: none, MP+lifting tool, MP+hammer
+                # If no risk found, report "No risk"
+                if not found_risk:
+                    pile_run_at_hammer_placement[bound_key] = 'No risk'
+    # --- Build dynamic table columns and values ---
+    table_headers = []
+    table_columns = []
+    for method in selected_methods:
+        for bound in selected_bounds:
+            table_headers.append(f'<b>{method} {bound.upper()}</b>')
+            table_columns.append([intersection_depths.get((method, bound), '')] + ['']*4)
+    # Table rows
+    table_row_labels = ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>']
+    # --- Create table ---
     weight_table = go.Table(
         header=dict(
             values=['<b></b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
@@ -616,10 +679,10 @@ def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
         ),
         cells=dict(
             values=[
-                ['<b>MP + lifting tool</b>', '<b>MP + hammer</b>'],  # First column (row labels)
-                ['', ''],  # LB column (empty)
-                ['', ''],  # BE column (empty)
-                ['', '']   # UB column (empty)
+                ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>'],
+                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], '', '', ''],  # LB column
+                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], '', '', ''],  # BE column
+                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], '', '', '']   # UB column
             ],
             fill_color='white',
             align=['left', 'center', 'center', 'center'],
@@ -634,6 +697,33 @@ def plot_rut_vs_depth(tables: Dict[str, pd.DataFrame], position: str,
     fig.update_xaxes(visible=False, row=2, col=4)
     fig.update_yaxes(visible=False, row=2, col=4)
     # ===============================================================================
+
+    # --- Info panel table in row 1, col 4 ---
+    info_table = go.Table(
+        header=dict(
+            values=['<b>Info</b>', '<b>Value</b>'],
+            fill_color='lightgray',
+            align='center',
+            font=dict(size=13, color='black', family='Arial')
+        ),
+        cells=dict(
+            values=[
+                ['Position', 'Monopile Weight [t]', 'Hammer', 'Hammer Weight [t]', 'Target Blowcount Rate [bl/25cm]'],
+                [
+                    position,
+                    f"{mp_weight:.1f}" if mp_weight is not None else '',
+                    position_info.get('hammer_name', ''),
+                    f"{position_info.get('hammer_weight', '')}",
+                    f"{position_info.get('target_blowcount_rate', '')}"
+                ]
+            ],
+            fill_color='white',
+            align=['left', 'center'],
+            font=dict(size=12, color='black', family='Arial'),
+            height=30
+        )
+    )
+    fig.add_trace(info_table, row=1, col=4)
 
     # Update layout for all subplots
     fig.update_layout(
@@ -897,7 +987,7 @@ def main():
     if selected_methods_input.lower() == 'all':
         selected_methods = methods
     else:
-        selected_methods = [m.strip().upper() for m in selected_methods_input.split(',') if m.strip()]
+        selected_methods = [m.strip() for m in selected_methods_input.split(',') if m.strip()]
 
     print(f"Selected methods: {selected_methods}")
 
@@ -911,30 +1001,24 @@ def main():
 
     print(f"Selected bounds: {selected_bounds}")
 
-    # Create output directory if it doesn't exist
-    output_dir = root_dir / "plots"
-    output_dir.mkdir(exist_ok=True)
-
-    # Read monopile weights for selected positions
-    excel_path = Path(MONOPILE_WEIGHTS_FILE)
-    if not excel_path.exists():
-        print(f"Warning: Monopile weight Excel file not found: {excel_path}")
-        monopile_weights = None
-    else:
-        monopile_weights = get_monopile_weights(excel_path, selected_positions)
-
-    # Plot for selected positions
+    # --- MAIN LOOP: Process each selected position ---
     for position in selected_positions:
-        if position in position_tables:
-            tables = position_tables[position]
-            position_info = get_position_info(position_tables, position)
-            plot_rut_vs_depth(tables, position, selected_methods, selected_bounds, output_dir, monopile_weights, position_info)
-        else:
-            print(f"Warning: No data found for position {position}")
+        print(f"\nProcessing position: {position}")
 
-    print("\n✓ Processing complete. Check plots in the 'plots' directory.")
+        # Get corresponding tables
+        tables = position_tables.get(position, {})
+
+        # Plot Rut vs Depth
+        plot_driveability_results(
+            tables=tables,
+            position=position,
+            selected_methods=selected_methods,
+            selected_bounds=selected_bounds,
+            output_dir=PLOTS_OUTPUT_DIR,
+            monopile_weights=get_monopile_weights(MONOPILE_WEIGHTS_FILE, [position]),
+            position_info=get_position_info(tables, position)
+        )
 
 
 if __name__ == "__main__":
     main()
-
