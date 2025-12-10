@@ -687,7 +687,8 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             if start_depth is not None:
                 for i in range(1, len(rut_kn)):
                     if depth[i] > start_depth:
-                        if (rut_kn[i-1] < mp_hammer_total_weight_kn <= rut_kn[i]) or (rut_kn[i-1] > mp_hammer_total_weight_kn >= rut_kn[i]):
+                        # Only upward crossing: SRD rises above MP+Hammer total weight
+                        if rut_kn[i-1] < mp_hammer_total_weight_kn <= rut_kn[i]:
                             d1, d2 = depth[i-1], depth[i]
                             r1, r2 = rut_kn[i-1], rut_kn[i]
                             if r2 != r1:
@@ -697,6 +698,36 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                             swp_mp_hammer_depths[bound_key] = f'{depth_cross:.2f}'
                             swp_mp_hammer_depths_numeric[bound_key] = depth_cross
                             break
+    # --- Find depth for pile run risk top (initiation) for each bound ---
+    pile_run_risk_top = {'LB': '', 'BE': '', 'UB': ''}
+    if mp_weight is not None:
+        mp_hammer_total_weight_kn = (nominal_mp_weight + HAMMER_WEIGHT) * 9.81
+        for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
+            rut_kn = rut * 1000
+            bound_key = bound.upper()
+            swp_mp_hammer_depth = swp_mp_hammer_depths_numeric.get(bound_key, None)
+            if swp_mp_hammer_depth is not None:
+                found_risk = False
+                for i in range(1, len(rut_kn)):
+                    current_depth = depth[i]
+                    # Only consider depths below the SWP MP+Hammer depth
+                    if current_depth > swp_mp_hammer_depth:
+                        if rut_kn[i] < mp_hammer_total_weight_kn:
+                            # Linear interpolation to find exact crossing depth
+                            if i > 0 and rut_kn[i-1] >= mp_hammer_total_weight_kn:
+                                d1, d2 = depth[i-1], depth[i]
+                                r1, r2 = rut_kn[i-1], rut_kn[i]
+                                if r2 != r1:
+                                    depth_cross = d1 + (mp_hammer_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
+                                else:
+                                    depth_cross = current_depth
+                            else:
+                                depth_cross = current_depth
+                            pile_run_risk_top[bound_key] = f'{depth_cross:.2f}'
+                            found_risk = True
+                            break
+                if not found_risk:
+                    pile_run_risk_top[bound_key] = 'No risk'
     # --- Build dynamic table columns and values ---
     table_headers = []
     table_columns = []
@@ -717,9 +748,9 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         cells=dict(
             values=[
                 ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>'],
-                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], swp_mp_hammer_depths['LB'], '', ''],  # LB column
-                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], swp_mp_hammer_depths['BE'], '', ''],  # BE column
-                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], '', '']   # UB column
+                [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], swp_mp_hammer_depths['LB'], pile_run_risk_top['LB'], ''],  # LB column
+                [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], swp_mp_hammer_depths['BE'], pile_run_risk_top['BE'], ''],  # BE column
+                [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], pile_run_risk_top['UB'], '']   # UB column
             ],
             fill_color='white',
             align=['left', 'center', 'center', 'center'],
