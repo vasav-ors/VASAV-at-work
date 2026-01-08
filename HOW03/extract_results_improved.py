@@ -243,27 +243,67 @@ def get_monopile_weights(excel_path: Path, positions: list) -> dict:
         return {}
 
 
-def get_position_info(position_tables, position):
+def get_position_info(position_tables, position, selected_methods=None, selected_bounds=None):
     """
     Extracts hammer name, hammer weight, and target blowcount rate for a given position.
     Returns a dict with keys: 'hammer_name', 'hammer_weight', 'target_blowcount_rate'.
+
+    If selected_methods and selected_bounds are provided, checks that all selected
+    method/bound combinations use the same hammer. If different hammers are used,
+    returns 'different hammers used'.
     """
     # Hammer weight always from user constant
     info = {'hammer_name': None, 'hammer_weight': HAMMER_WEIGHT, 'target_blowcount_rate': None}
-    tables = position_tables.get(position, {})
-    # Hammer name from first table (usually 'inputs')
-    for table in tables.values():
-        if 'Hammer_name' in table.columns:
-            val = table['Hammer_name'].iloc[0]
+    # position_tables is already the tables dict for this position
+    tables = position_tables
+
+    # Get hammer name from summary table
+    summary_table = tables.get('results_PileDrivingAnalysis_Summary')
+    if summary_table is not None and 'Hammer_name' in summary_table.columns:
+        # If selected methods and bounds are provided, check for consistency
+        if selected_methods is not None and selected_bounds is not None:
+            hammer_names = set()
+
+            # Check hammer name for each selected method/bound combination
+            for idx, row in summary_table.iterrows():
+                # Extract method and bound from this row
+                method_col = row.get('Method', '')
+                bound_col = row.get('SoilCase', '')
+
+                # Map full method names to short codes
+                method_short = None
+                if 'MonoDrive' in str(method_col):
+                    method_short = 'MD'
+                elif 'Maynard' in str(method_col):
+                    method_short = 'MY'
+                elif 'Alm and Hamre' in str(method_col) or 'Alm' in str(method_col):
+                    method_short = 'AH'
+
+                # Check if this row matches selected methods and bounds
+                if method_short in selected_methods and str(bound_col).lower() in selected_bounds:
+                    hammer_name = row.get('Hammer_name', None)
+                    if pd.notna(hammer_name):
+                        hammer_names.add(str(hammer_name))
+
+            # Check if all selected combinations have the same hammer
+            if len(hammer_names) == 0:
+                info['hammer_name'] = ''
+            elif len(hammer_names) == 1:
+                info['hammer_name'] = hammer_names.pop()
+            else:
+                info['hammer_name'] = 'different hammers used'
+        else:
+            # No filtering - just get first hammer name
+            val = summary_table['Hammer_name'].iloc[0]
             if pd.notna(val):
                 info['hammer_name'] = str(val)
-            break
+
     # Target blowcount rate from summary table column 'Target_Blowcount_Rate'
-    summary_table = tables.get('results_PileDrivingAnalysis_Summary')
+    # Note: CSV values are in blows/m, but we display in blows/25cm, so divide by 4
     if summary_table is not None and 'Target_Blowcount_Rate' in summary_table.columns:
         val = summary_table['Target_Blowcount_Rate'].iloc[0]
         if pd.notna(val):
-            info['target_blowcount_rate'] = float(val)
+            info['target_blowcount_rate'] = float(val) / 4.0  # Convert blows/m to blows/25cm
     return info
 
 
@@ -1088,7 +1128,7 @@ def main():
             selected_bounds=selected_bounds,
             output_dir=PLOTS_OUTPUT_DIR,
             monopile_weights=get_monopile_weights(MONOPILE_WEIGHTS_FILE, [position]),
-            position_info=get_position_info(tables, position)
+            position_info=get_position_info(tables, position, selected_methods, selected_bounds)
         )
 
 
