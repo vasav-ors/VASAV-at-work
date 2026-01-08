@@ -915,22 +915,23 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
 
     # === CREATE ASSESSMENT RESULTS TABLE ===
     weight_table = go.Table(
+        columnwidth=[0.526, 0.158, 0.158, 0.158],  # Control column widths: 50% for first column, 17% each for LB/BE/UB
         header=dict(
-            values=['<b>Self weight penetration and pile run assessment</b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
+            values=['<b>Evaluated  Depth [mbsf]</b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
             fill_color=['#b3c6e7', '#e6f2ff', '#e6f2ff', '#e6f2ff'],  # Nicer color for first row
             align='center',
             font=dict(size=13, color='black', family='Arial')
         ),
         cells=dict(
             values=[
-                ['<b>SWP MP + ILT</b>', '<b>Pile run at hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>'],
+                ['<b>SWP MP + ILT</b>', '<b>Pile run @ hammer placement</b>', '<b>SWP MP + Hammer</b>', '<b>Pile run risk top</b>', '<b>Pile run risk bottom</b>'],
                 [swp_mp_ilt_depths['LB'], pile_run_at_hammer_placement['LB'], swp_mp_hammer_depths['LB'], pile_run_risk_top['LB'], pile_run_risk_bottom['LB']],  # LB column
                 [swp_mp_ilt_depths['BE'], pile_run_at_hammer_placement['BE'], swp_mp_hammer_depths['BE'], pile_run_risk_top['BE'], pile_run_risk_bottom['BE']],  # BE column
                 [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], pile_run_risk_top['UB'], pile_run_risk_bottom['UB']]   # UB column
             ],
             fill_color='white',
             align=['left', 'center', 'center'],
-            font=dict(size=12, color='black', family='Arial'),
+            font=dict(size=11.9, color='black', family='Arial'),
             height=30
         )
     )
@@ -946,7 +947,7 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
     info_table = go.Table(
         header=dict(
             values=['<b>Info</b>', '<b>Value</b>'],
-            fill_color='lightgray',
+            fill_color='#b3c6e7',
             align='center',
             font=dict(size=13, color='black', family='Arial')
         ),
@@ -1166,6 +1167,19 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         mirror=True,
         showticklabels=True,
         row=2, col=3
+    )
+
+
+    fig.add_annotation(
+        text="<b>Self weight penetration and pile run assessment</b>",
+        xref="paper",
+        yref="paper",
+        x=0.75,
+        y=0.44,
+        showarrow=False,
+        font=dict(size=14, color='black', family='Arial'),
+        xanchor='left',
+        yanchor='bottom'
     )
 
     # Save or show
