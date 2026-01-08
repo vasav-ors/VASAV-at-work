@@ -881,6 +881,38 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             row=2, col=3
         )
 
+        # Add invisible traces for legend in row 2, col 3 only
+        # These create legend entries without showing actual data points
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode='lines',
+                line=dict(color='black', width=2, dash='dash'),
+                name='MP+ILT',
+                showlegend=True,
+                legendgroup='srd_lines',
+                legend='legend2',  # Use separate legend
+                hoverinfo='skip'
+            ),
+            row=2, col=3
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode='lines',
+                line=dict(color='black', width=2, dash='solid'),
+                name='MP+Hammer',
+                showlegend=True,
+                legendgroup='srd_lines',
+                legend='legend2',  # Use separate legend
+                hoverinfo='skip'
+            ),
+            row=2, col=3
+        )
+
     # === CREATE ASSESSMENT RESULTS TABLE ===
     weight_table = go.Table(
         header=dict(
@@ -1036,6 +1068,18 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             bgcolor="rgba(255, 255, 255, 0.9)",
             bordercolor="Black",
             borderwidth=1
+        ),
+        legend2=dict(
+            yanchor="bottom",
+            y=0.04,  # Position within row 2 area (0.5 to 1.0 for row 2)
+            xanchor="left",
+            x=0.51,  # Position within col 3 area (approximately 0.69-0.92 for col 3)
+            bgcolor="rgba(255, 255, 255, 0.9)",
+            bordercolor="Black",
+            borderwidth=1,
+            orientation="v",  # Vertical orientation
+            font=dict(size=10),
+            title=dict(text="", font=dict(size=10))  # No title for cleaner look
         ),
         width=1587,   # A3 landscape width (420mm) at 96 DPI
         height=1123,  # A3 landscape height (297mm) at 96 DPI
