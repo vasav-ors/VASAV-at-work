@@ -33,7 +33,8 @@ ADDITIONAL_WEIGHT = 20 # any additional weight in MP like flange and pins for se
 MONOPILE_WEIGHTS_FILE = r"C:/Users/vasav/PyCharmProjects/VASAV-at-work/HOW03/summary-01_Primary_Steel_Design_Verification_25yr.xls"
 
 # USER DEFINED CONSTANT FOR MONOPILE ROOT DIRECTORY
-MONOPILE_ROOT_DIR = Path(r"K:/DOZR/HOW03/GEO/05_Driveability/20241108_Cleaned_Const_blow/variations/const_blow_0.25m_intrvl_200bl_limit/monopiles")
+MONOPILE_ROOT_DIR = Path(r""
+                         r"K:/DOZR/HOW03/GEO/05_Driveability/20241108_Cleaned_Const_blow/variations/const_blow_0.25m_intrvl_200bl_limit/monopiles")
 
 # USER DEFINED CONSTANT FOR OUTPUT DIRECTORY WHERE PLOTS ARE SAVED
 PLOTS_OUTPUT_DIR = MONOPILE_ROOT_DIR / "plots"
@@ -294,7 +295,7 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         'AH': '#2ca02c'   # green
     }
 
-    # Define line dash patterns for bounds (Plotly format)
+    # Define line dash patterns for bounds (Plotly format)A01
     bound_dashes = {
         'be': 'solid',      # best estimate: solid line
         'lb': 'dash',       # lower bound: dashed line
@@ -622,44 +623,27 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                         swp_mp_ilt_depths_numeric['UB'] = depth_cross
                     break
 
-    # --- Find depth where SRD becomes less than nominal MP + lifting tool (below SWP MP+ILT depth) ---
+    # --- Find depth where SRD becomes less than nominal MP  (below SWP MP+ILT depth) ---
     pile_run_at_hammer_placement = {'LB': '', 'BE': '', 'UB': ''}
     if mp_weight is not None:
-        mp_lift_tool_total_weight_kn = (nominal_mp_weight + INTERNAL_LIFTING_TOOL) * 9.81
-        # For each bound, find where SRD drops below mp_lift_tool_total_weight_kn
+        mp_only_total_weight_kn = nominal_mp_weight * 9.81  # Only monopile weight, no ILT
         for method, bound, rut, depth in zip(methods_to_plot, bounds_to_plot, ruts_to_plot, depths_to_plot):
             rut_kn = rut * 1000
             bound_key = bound.upper()
-
-            # Get the SWP MP+ILT depth for this bound
-            swp_depth = swp_mp_ilt_depths_numeric.get(bound_key, None)
-
-            if swp_depth is not None:
-                # Look for first depth below swp_depth where SRD < mp_lift_tool_total_weight_kn
-                found_risk = False
-                for i in range(1, len(rut_kn)):
-                    current_depth = depth[i]
-                    # Only consider depths below the SWP MP+ILT depth
-                    if current_depth > swp_depth:
-                        # Check if SRD drops below the lifting tool threshold
-                        if rut_kn[i] < mp_lift_tool_total_weight_kn:
-                            # Linear interpolation to find exact crossing depth
-                            if i > 0 and rut_kn[i-1] >= mp_lift_tool_total_weight_kn:
-                                d1, d2 = depth[i-1], depth[i]
-                                r1, r2 = rut_kn[i-1], rut_kn[i]
-                                if r2 != r1:
-                                    depth_cross = d1 + (mp_lift_tool_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
-                                else:
-                                    depth_cross = current_depth
-                            else:
-                                depth_cross = current_depth
-                            pile_run_at_hammer_placement[bound_key] = f'{depth_cross:.2f}'
-                            found_risk = True
-                            break
-
-                # If no risk found, report "No risk"
-                if not found_risk:
-                    pile_run_at_hammer_placement[bound_key] = 'No risk'
+            found_risk = False
+            for i in range(1, len(rut_kn)):
+                if rut_kn[i-1] >= mp_only_total_weight_kn and rut_kn[i] < mp_only_total_weight_kn:
+                    d1, d2 = depth[i-1], depth[i]
+                    r1, r2 = rut_kn[i-1], rut_kn[i]
+                    if r2 != r1:
+                        depth_cross = d1 + (mp_only_total_weight_kn - r1) * (d2 - d1) / (r2 - r1)
+                    else:
+                        depth_cross = d1
+                    pile_run_at_hammer_placement[bound_key] = f'{depth_cross:.2f}'
+                    found_risk = True
+                    break
+            if not found_risk:
+                pile_run_at_hammer_placement[bound_key] = 'No risk'
     # --- Find depth for SWP MP + Hammer for each bound ---
     swp_mp_hammer_depths = {'LB': '', 'BE': '', 'UB': ''}
     swp_mp_hammer_depths_numeric = {'LB': None, 'BE': None, 'UB': None}
@@ -760,8 +744,8 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
     # --- Create table ---
     weight_table = go.Table(
         header=dict(
-            values=['<b></b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
-            fill_color='lightgray',
+            values=['<b>Self weight penetration and pile run assessment</b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
+            fill_color=['#b3c6e7', '#e6f2ff', '#e6f2ff', '#e6f2ff'],  # Nicer color for first row
             align='center',
             font=dict(size=13, color='black', family='Arial')
         ),
@@ -773,7 +757,7 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 [swp_mp_ilt_depths['UB'], pile_run_at_hammer_placement['UB'], swp_mp_hammer_depths['UB'], pile_run_risk_top['UB'], pile_run_risk_bottom['UB']]   # UB column
             ],
             fill_color='white',
-            align=['left', 'center', 'center', 'center'],
+            align=['left', 'center', 'center'],
             font=dict(size=12, color='black', family='Arial'),
             height=30
         )
