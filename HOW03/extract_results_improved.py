@@ -582,6 +582,146 @@ def calculate_swp_and_pile_run_assessment(
     return results
 
 
+def extract_soil_profile_data(input_file_path: Path):
+    """
+    Extract soil profile data from input position CSV file.
+
+    Returns a dictionary containing:
+        - depth_below_seabed: array of depths
+        - qc_mpa: array of qc values in MPa
+        - colors: array of hex colors for each layer
+        - geo_units: array of geoUnit names (or None)
+        - qc_step: step plot x-values for qc
+        - depth_step: step plot y-values for depth
+        - max_qc: maximum qc value
+        - geo_unit_zones: list of (unit_name, start_depth, end_depth) tuples
+
+    Returns None if data cannot be extracted.
+    """
+    try:
+        tables = parse_results_csv(input_file_path)
+    except Exception as e:
+        print(f"Error parsing input file {input_file_path}: {e}")
+        return None
+
+    # Get zSeabed from position_data table
+    position_data_table = tables.get('position_data')
+    zSeabed = None
+    if position_data_table is not None and 'zSeabed' in position_data_table.columns:
+        try:
+            zSeabed_value = position_data_table['zSeabed'].iloc[0]
+            zSeabed = pd.to_numeric(zSeabed_value, errors='coerce')
+            if pd.isna(zSeabed):
+                zSeabed = None
+        except (IndexError, KeyError):
+            zSeabed = None
+
+    # Get soil table
+    soil_table = tables.get('soil')
+    if soil_table is None:
+        return None
+
+    # Extract required columns
+    required_cols = ['z_top', 'qc', 'plot_Color']
+    if not all(col in soil_table.columns for col in required_cols):
+        return None
+
+    z_top_lat = pd.to_numeric(soil_table['z_top'], errors='coerce')
+    qc_pa = pd.to_numeric(soil_table['qc'], errors='coerce')
+    colors = soil_table['plot_Color'].fillna('#d3d3d3').astype(str).replace(['nan', 'NaN', 'NA', ''], '#d3d3d3')
+
+    # Extract geoUnit if available
+    geo_units = None
+    if 'geoUnit' in soil_table.columns:
+        geo_units = soil_table['geoUnit'].fillna('').astype(str)
+
+    # Filter valid data
+    valid_initial = z_top_lat.notna() & qc_pa.notna()
+    z_top_lat = z_top_lat[valid_initial]
+    qc_pa = qc_pa[valid_initial]
+    colors = colors[valid_initial]
+    if geo_units is not None:
+        geo_units = geo_units[valid_initial]
+
+    if len(z_top_lat) == 0:
+        return None
+
+    # Determine seabed elevation
+    seabed_elevation = zSeabed if zSeabed is not None else z_top_lat.iloc[0]
+
+    # Calculate depth below seabed
+    depth_below_seabed = seabed_elevation - z_top_lat
+    qc_mpa = qc_pa / 1e6
+
+    # Filter to layers below seabed
+    valid_mask = (depth_below_seabed >= 0) & (qc_mpa > 0)
+    depth_below_seabed = depth_below_seabed[valid_mask]
+    qc_mpa = qc_mpa[valid_mask]
+    colors = colors[valid_mask]
+    if geo_units is not None:
+        geo_units = geo_units[valid_mask]
+
+    if len(depth_below_seabed) == 0:
+        return None
+
+    # Build step plot data
+    qc_step = []
+    depth_step = []
+    for i in range(len(depth_below_seabed) - 1):
+        depth_start = depth_below_seabed.iloc[i]
+        depth_end = depth_below_seabed.iloc[i + 1]
+        qc_value = qc_mpa.iloc[i]
+        qc_step.extend([qc_value, qc_value])
+        depth_step.extend([depth_start, depth_end])
+
+    if len(depth_below_seabed) > 0:
+        qc_step.append(qc_mpa.iloc[-1])
+        depth_step.append(depth_below_seabed.iloc[-1])
+
+    max_qc = qc_mpa.max()
+
+    # Identify geoUnit zones
+    geo_unit_zones = []
+    if geo_units is not None and len(geo_units) > 0:
+        geo_units_reset = geo_units.reset_index(drop=True)
+        depth_reset = depth_below_seabed.reset_index(drop=True)
+
+        current_unit = None
+        zone_start = None
+
+        for i in range(len(geo_units_reset)):
+            unit = geo_units_reset.iloc[i]
+            depth = depth_reset.iloc[i]
+
+            if not unit or unit in ['', 'nan', 'NaN', 'NA']:
+                if current_unit is not None:
+                    geo_unit_zones.append((current_unit, zone_start, depth))
+                    current_unit = None
+                    zone_start = None
+                continue
+
+            if unit != current_unit:
+                if current_unit is not None:
+                    geo_unit_zones.append((current_unit, zone_start, depth))
+                current_unit = unit
+                zone_start = depth
+
+        if current_unit is not None and len(depth_reset) > 0:
+            last_depth = depth_reset.iloc[-1]
+            geo_unit_zones.append((current_unit, zone_start, last_depth))
+
+    return {
+        'depth_below_seabed': depth_below_seabed,
+        'qc_mpa': qc_mpa,
+        'colors': colors,
+        'geo_units': geo_units,
+        'qc_step': qc_step,
+        'depth_step': depth_step,
+        'max_qc': max_qc,
+        'geo_unit_zones': geo_unit_zones
+    }
+
+
 def plot_soil_profile(position: str, input_file_path: Path, output_dir: Path = None):
     """
     Plot soil profile: Depth below mudline vs qc (cone resistance).
@@ -899,12 +1039,18 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                       selected_methods: List[str], selected_bounds: List[str],
                       output_dir: Path = None,
                       monopile_weights: dict = None,
-                      position_info: dict = None):
+                      position_info: dict = None,
+                      soil_profile_data: dict = None):
     """
     Plot Rut vs Depth for selected methods and bounds using Plotly (interactive).
     Each method gets a unique color, each bound gets a unique line style.
 
     IMPROVED VERSION: Info panel now uses go.Table for professional appearance.
+
+    Args:
+        soil_profile_data: Optional dict with soil profile data to overlay on SRD plot.
+                          Should contain keys: depth_below_seabed, qc_mpa, colors, qc_step,
+                          depth_step, max_qc, geo_unit_zones
     """
     # Extract target depth from summary table
     target_depth = None
@@ -935,9 +1081,10 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
     # Optimized for A3 paper (landscape): 420mm x 297mm
     # row_heights: [0.5, 0.5] gives equal height to both rows
     # column_widths: [0.23, 0.23, 0.23, 0.31] gives slightly more space to table column
+    # shared_yaxes='all' enables synchronized zooming across ALL subplots (both rows)
     fig = make_subplots(
         rows=2, cols=4,
-        shared_yaxes=False,
+        shared_yaxes='all',  # Enable shared y-axes for synchronized zooming across ALL subplots
         row_heights=[0.5, 0.5],  # Equal height for both rows - optimized for A3 printing
         column_widths=[0.23, 0.23, 0.23, 0.31],  # Equal width for plots, slightly wider for tables
         horizontal_spacing=0.06,
@@ -947,6 +1094,20 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                [{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}, {'type': 'table'}]]
     )
     plot_count = 0
+
+    # Store soil profile data for later (will be added after all traces are plotted)
+    # This ensures we know the axis ranges
+    soil_layer_data = None
+    if soil_profile_data is not None:
+        print("Preparing soil profile overlay for SRD plot...")
+        soil_layer_data = {
+            'depth_below_seabed': soil_profile_data['depth_below_seabed'],
+            'colors': soil_profile_data['colors'],
+            'qc_step': soil_profile_data['qc_step'],
+            'depth_step': soil_profile_data['depth_step'],
+            'max_qc': soil_profile_data['max_qc'],
+            'geo_unit_zones': soil_profile_data['geo_unit_zones']
+        }
 
     methods_to_plot = []
     bounds_to_plot = []
@@ -1524,6 +1685,184 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         yanchor='bottom'
     )
 
+    # Add qc profile overlay to SRD subplot if soil layer data is prepared
+    if soil_layer_data is not None:
+        print("Finalizing soil profile overlay on SRD plot...")
+
+        depth_below_seabed = soil_layer_data['depth_below_seabed']
+        colors = soil_layer_data['colors']
+        qc_step = soil_layer_data['qc_step']
+        depth_step = soil_layer_data['depth_step']
+        max_qc = soil_layer_data['max_qc']
+        geo_unit_zones = soil_layer_data['geo_unit_zones']
+
+        # Determine the depth range to use (same as other plots - just below target depth)
+        # Find the maximum depth from the actual SRD data traces
+        max_depth = 0
+        for trace in fig.data:
+            # Check if this trace has depth data (y values) and is not a table
+            if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
+                try:
+                    trace_max = max(trace.y)
+                    if trace_max > max_depth:
+                        max_depth = trace_max
+                except:
+                    pass
+
+        # If we couldn't determine from traces, use target depth + buffer
+        if max_depth == 0:
+            if target_depth:
+                max_depth = target_depth + 5  # Default: 5m below target
+            else:
+                max_depth = 40  # Fallback
+
+        print(f"  Using max depth: {max_depth:.2f} m for soil profile overlay")
+
+        # Filter soil layers and qc data to only show up to max_depth
+        depth_below_seabed_filtered = depth_below_seabed[depth_below_seabed <= max_depth]
+
+        # Filter qc step data
+        qc_step_filtered = []
+        depth_step_filtered = []
+        for i, d in enumerate(depth_step):
+            if d <= max_depth:
+                qc_step_filtered.append(qc_step[i])
+                depth_step_filtered.append(d)
+
+        # Add soil layer backgrounds as shapes to ONLY the first subplot (row 1, col 1)
+        # This provides geological context without making other plots too visually heavy
+        num_layers = len(depth_below_seabed_filtered) - 1
+
+        # Add each soil layer to subplot row 1, col 1
+        for i in range(num_layers):
+            if i >= len(colors):
+                break
+            depth_start = depth_below_seabed_filtered.iloc[i]
+            depth_end = depth_below_seabed_filtered.iloc[i + 1] if i + 1 < len(depth_below_seabed_filtered) else max_depth
+            layer_color = str(colors.iloc[i])
+
+            if not layer_color.startswith('#') and not layer_color.startswith('rgb'):
+                layer_color = '#d3d3d3'
+
+            # Add shape spanning full width of subplot in x-direction (using x domain coordinates)
+            fig.add_shape(
+                type="rect",
+                xref="x domain",  # Use domain coordinates (0 to 1) for x
+                yref="y",  # Use data coordinates for y (depth)
+                x0=0,  # Left edge of subplot
+                x1=1,  # Right edge of subplot
+                y0=depth_start,
+                y1=depth_end,
+                fillcolor=layer_color,
+                line=dict(width=0),
+                layer="below",  # Draw below traces
+                row=1, col=1
+            )
+
+        # Add the last layer extending to the bottom of the subplot (max_depth)
+        if len(depth_below_seabed_filtered) > 0 and len(colors) > 0:
+            last_depth = depth_below_seabed_filtered.iloc[-1]
+            last_color = str(colors.iloc[min(len(depth_below_seabed_filtered) - 1, len(colors) - 1)])
+
+            if not last_color.startswith('#') and not last_color.startswith('rgb'):
+                last_color = '#d3d3d3'
+
+            # Extend the last layer color to the bottom of the plot
+            fig.add_shape(
+                type="rect",
+                xref="x domain",
+                yref="y",
+                x0=0,
+                x1=1,
+                y0=last_depth,
+                y1=max_depth,  # Extend to bottom of subplot
+                fillcolor=last_color,
+                line=dict(width=0),
+                layer="below",
+                row=1, col=1
+            )
+
+        # Add qc step plot trace using the secondary axis (grey line)
+        # IMPORTANT: Don't use row/col parameters to preserve axis references
+        fig.add_trace(
+            go.Scatter(
+                x=qc_step_filtered,
+                y=depth_step_filtered,
+                mode='lines',
+                name='qc Profile',
+                line=dict(color='grey', width=2, dash='solid'),
+                xaxis='x7',  # Use secondary x-axis
+                yaxis='y',   # Use same y-axis as SRD plot (row 1, col 1)
+                hovertemplate='<b>qc Profile</b><br>qc: %{x:.2f} MPa<br>Depth: %{y:.2f} m<br><extra></extra>',
+                showlegend=False  # Don't show in legend
+            )
+        )
+
+        # Add secondary x-axis for qc (overlaying xaxis which is row 1, col 1)
+        # We'll create xaxis7 as it doesn't conflict with existing axes
+        # Configure AFTER adding the trace to ensure it's properly rendered
+        fig.update_layout(
+            xaxis7=dict(
+                title=dict(text='qc [MPa]', font=dict(color='grey', size=11)),
+                overlaying='x',  # Overlay on xaxis (row 1, col 1)
+                side='top',
+                anchor='y',  # Anchor to yaxis (row 1, col 1)
+                range=[0, max_qc * 1.1],
+                showline=True,  # IMPORTANT: Must be True to show the axis line
+                linecolor='grey',
+                linewidth=2,
+                showgrid=False,  # Don't show grid to avoid clutter
+                zeroline=False,
+                showticklabels=True,  # Show tick labels
+                tickmode='linear',  # Use linear tick mode
+                tick0=0,  # Start ticks at 0
+                dtick=20,  # Major tick marks every 20 MPa
+                ticks='outside',  # Show ticks outside
+                ticklen=5,
+                tickwidth=2,
+                tickcolor='grey',
+                tickfont=dict(color='grey', size=10),
+                mirror=False,
+                # Add minor ticks every 5 MPa
+                minor=dict(
+                    tickmode='linear',
+                    tick0=0,
+                    dtick=5,  # Minor tick marks every 5 MPa
+                    ticks='outside',
+                    ticklen=3,  # Shorter than major ticks
+                    tickwidth=1,
+                    tickcolor='grey',
+                    showgrid=False
+                )
+            )
+        )
+
+        # Explicitly set the yaxis range to ensure it doesn't auto-extend beyond max_depth
+        # This ensures all subplots have the same vertical axis range
+        fig.update_yaxes(range=[max_depth, 0], row=1, col=1)
+
+        # Add geoUnit labels (only for zones visible in the depth range)
+        # Position them at the far right boundary of the subplot
+        for unit_name, start_depth, end_depth in geo_unit_zones:
+            if start_depth <= max_depth:
+                # Use paper coordinates to position at far right of subplot
+                # For row 1, col 1, the x domain is approximately 0 to 0.23 (based on column_widths=[0.23, ...])
+                # We want to position at 95% within this subplot
+
+                fig.add_annotation(
+                    x=0.95,  # 95% from left edge of subplot (using x domain)
+                    y=start_depth,
+                    xref='x domain',  # Reference to x-axis domain (0-1 within subplot)
+                    yref='y',  # Reference to y-axis (depth data coordinates)
+                    text=f'<b>{unit_name}</b>',
+                    showarrow=False,
+                    font=dict(size=11, color='black', family='Arial'),
+                    xanchor='right',  # Anchor text to the right so it doesn't extend beyond boundary
+                    yanchor='top'
+                )
+
+        print(f"  Added qc profile, {num_layers} soil layers, and {len([z for z in geo_unit_zones if z[1] <= max_depth])} geoUnit labels to SRD subplot")
+
     # Save or show
     if output_dir:
         output_path = output_dir / f'rut_vs_depth_{position}.html'
@@ -1620,7 +1959,20 @@ def main():
         # Get corresponding tables
         tables = position_tables.get(position, {})
 
-        # Plot Rut vs Depth
+        # Extract soil profile data from input position file (for overlay on SRD plot)
+        soil_profile_data = None
+        try:
+            position_dir = MONOPILE_ROOT_DIR / position
+            input_files = list(position_dir.glob(f'input_Position_*_{position}.csv'))
+            if input_files:
+                input_file = input_files[0]
+                soil_profile_data = extract_soil_profile_data(input_file)
+                if soil_profile_data:
+                    print(f"Extracted soil profile data for overlay on SRD plot")
+        except Exception as e:
+            print(f"Warning: Could not extract soil profile data: {e}")
+
+        # Plot Rut vs Depth with soil profile overlay
         plot_driveability_results(
             tables=tables,
             position=position,
@@ -1628,27 +1980,12 @@ def main():
             selected_bounds=selected_bounds,
             output_dir=PLOTS_OUTPUT_DIR,
             monopile_weights=get_monopile_weights(MONOPILE_WEIGHTS_FILE, [position]),
-            position_info=get_position_info(tables, position, selected_methods, selected_bounds)
+            position_info=get_position_info(tables, position, selected_methods, selected_bounds),
+            soil_profile_data=soil_profile_data
         )
-
-        # Plot Soil Profile from input position file (independent of driveability plot)
-        try:
-            # Find the input position CSV file in the monopile directory
-            position_dir = MONOPILE_ROOT_DIR / position
-            input_files = list(position_dir.glob(f'input_Position_*_{position}.csv'))
-
-            if input_files:
-                input_file = input_files[0]  # Take the first match
-                print(f"\nFound input position file: {input_file.name}")
-                plot_soil_profile(position=position, input_file_path=input_file, output_dir=PLOTS_OUTPUT_DIR)
-            else:
-                print(f"\nWarning: No input position file found for {position}")
-                print(f"  Searched in: {position_dir}")
-                print(f"  Pattern: input_Position_*_{position}.csv")
-        except Exception as e:
-            print(f"\nError plotting soil profile for {position}: {e}")
-            print("Continuing with next position...")
 
 
 if __name__ == "__main__":
     main()
+
+
