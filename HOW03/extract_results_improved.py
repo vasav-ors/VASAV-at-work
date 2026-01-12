@@ -53,9 +53,20 @@ def parse_results_csv(file_path: Path) -> Dict[str, pd.DataFrame]:
     """
     tables = {}
 
-    # Read the entire file
-    with open(str(file_path), 'r', encoding='utf-8') as f:
-        content = f.read()
+    # Read the entire file - try multiple encodings
+    encodings = ['utf-8', 'windows-1252', 'latin-1', 'cp1252', 'iso-8859-1']
+    content = None
+
+    for encoding in encodings:
+        try:
+            with open(str(file_path), 'r', encoding=encoding) as f:
+                content = f.read()
+            break  # Success - stop trying other encodings
+        except (UnicodeDecodeError, LookupError):
+            continue  # Try next encoding
+
+    if content is None:
+        raise ValueError(f"Could not read file {file_path} with any of the supported encodings: {encodings}")
 
     # Split by double asterisks to find table headers
     sections = re.split(r'\*\*', content)
@@ -94,12 +105,22 @@ def parse_results_csv(file_path: Path) -> Dict[str, pd.DataFrame]:
         data_rows = [line.split(';') for line in data_lines]
         df = pd.DataFrame(data_rows, columns=headers)
 
-        # Convert numeric columns
+        # Convert numeric columns - handle NaN strings properly
+        # Only convert columns that are actually numeric (don't force conversion on text columns)
         for col in df.columns:
             try:
-                df[col] = pd.to_numeric(df[col])
+                # Replace common NaN representations before attempting conversion
+                df[col] = df[col].replace(['NaN', 'nan', 'NA', 'na', ''], pd.NA)
+
+                # Try to convert to numeric, but only if the column seems to be numeric
+                # Check if at least some values can be converted
+                test_series = pd.to_numeric(df[col], errors='coerce')
+                # If more than 50% of non-NA values were successfully converted, treat as numeric
+                if test_series.notna().sum() > len(df[col].dropna()) * 0.5:
+                    df[col] = test_series
+                # Otherwise keep as string (for columns like plot_Color, geoUnit, etc.)
             except (ValueError, TypeError):
-                pass  # Keep as string if conversion fails
+                pass  # Keep as original if conversion fails
 
         tables[table_name] = df
 
@@ -245,15 +266,15 @@ def get_monopile_weights(excel_path: Path, positions: list) -> dict:
 
 def get_position_info(position_tables, position, selected_methods=None, selected_bounds=None):
     """
-    Extracts hammer name, hammer weight, and target blowcount rate for a given position.
-    Returns a dict with keys: 'hammer_name', 'hammer_weight', 'target_blowcount_rate'.
+    Extracts hammer name, hammer weight, target blowcount rate, and target penetration depth for a given position.
+    Returns a dict with keys: 'hammer_name', 'hammer_weight', 'target_blowcount_rate', 'target_penetration_depth'.
 
     If selected_methods and selected_bounds are provided, checks that all selected
     method/bound combinations use the same hammer. If different hammers are used,
     returns 'different hammers used'.
     """
     # Hammer weight always from user constant
-    info = {'hammer_name': None, 'hammer_weight': HAMMER_WEIGHT, 'target_blowcount_rate': None}
+    info = {'hammer_name': None, 'hammer_weight': HAMMER_WEIGHT, 'target_blowcount_rate': None, 'target_penetration_depth': None}
     # position_tables is already the tables dict for this position
     tables = position_tables
 
@@ -304,6 +325,13 @@ def get_position_info(position_tables, position, selected_methods=None, selected
         val = summary_table['Target_Blowcount_Rate'].iloc[0]
         if pd.notna(val):
             info['target_blowcount_rate'] = float(val) / 4.0  # Convert blows/m to blows/25cm
+
+    # Target penetration depth from summary table column 'targetdepth'
+    if summary_table is not None and 'targetdepth' in summary_table.columns:
+        val = summary_table['targetdepth'].iloc[0]
+        if pd.notna(val):
+            info['target_penetration_depth'] = float(val)
+
     return info
 
 
@@ -552,6 +580,319 @@ def calculate_swp_and_pile_run_assessment(
             results['pile_run_risk_bottom'][bound_key] = 'No bottom'
 
     return results
+
+
+def plot_soil_profile(position: str, input_file_path: Path, output_dir: Path = None):
+    """
+    Plot soil profile: Depth below mudline vs qc (cone resistance).
+
+    This function is COMPLETELY INDEPENDENT from the driveability plotting.
+    It reads its own input file, processes its own data, and creates its own plot.
+
+    Reads the **soil table and **position_data table from the input position CSV file.
+    Creates a stratigraphy plot with:
+    - Colored background layers (from plot_Color column)
+    - Step plot showing constant qc within each layer
+    - Only layers below seabed (depth >= 0)
+    - Linear scale x-axis
+
+    Args:
+        position: Position name (e.g., 'A01')
+        input_file_path: Path to input_Position_*.csv file (independent from driveability CSV)
+        output_dir: Directory to save the plot (optional)
+
+    Returns:
+        None (creates and saves plot, or returns early on error)
+    """
+    print(f"\n{'='*60}")
+    print(f"Plotting Soil Profile for Position {position}")
+    print(f"{'='*60}")
+
+    # Parse the input CSV file to get the **soil table
+    try:
+        tables = parse_results_csv(input_file_path)
+    except Exception as e:
+        print(f"Error parsing input file {input_file_path}: {e}")
+        return
+
+    # Get the position_data table to read zSeabed
+    position_data_table = tables.get('position_data')
+    zSeabed = None
+    if position_data_table is not None and 'zSeabed' in position_data_table.columns:
+        try:
+            zSeabed_value = position_data_table['zSeabed'].iloc[0]
+            zSeabed = pd.to_numeric(zSeabed_value, errors='coerce')
+            if pd.notna(zSeabed):
+                print(f"Found zSeabed from position_data: {zSeabed} m")
+            else:
+                print(f"Warning: zSeabed value is NaN, will use first layer elevation instead")
+                zSeabed = None
+        except (IndexError, KeyError) as e:
+            print(f"Warning: Could not read zSeabed from position_data: {e}")
+            zSeabed = None
+    else:
+        print(f"Warning: No position_data table or zSeabed column found")
+
+    # Get the soil table
+    soil_table = tables.get('soil')
+    if soil_table is None:
+        print(f"Warning: No **soil table found in {input_file_path}")
+        return
+
+    print(f"Found soil table with {len(soil_table)} layers")
+
+    # Debug: Show available columns
+    print(f"Available columns: {list(soil_table.columns)}")
+
+    # Debug: Show first few rows
+    print(f"First 3 rows of soil table:")
+    print(soil_table[['z_top', 'qc', 'plot_Color']].head(3))
+
+    # Check required columns
+    required_cols = ['z_top', 'qc', 'plot_Color']
+    missing_cols = [col for col in required_cols if col not in soil_table.columns]
+    if missing_cols:
+        print(f"Error: Missing required columns in soil table: {missing_cols}")
+        return
+
+    # Extract data and convert to numeric
+    print(f"\nExtracting and converting soil data...")
+    z_top_lat = pd.to_numeric(soil_table['z_top'], errors='coerce')  # Elevation in LAT (meters)
+    qc_pa = pd.to_numeric(soil_table['qc'], errors='coerce')  # Cone resistance in Pa
+
+    # Handle plot_Color: convert to string and replace NaN/invalid values with default color
+    colors = soil_table['plot_Color'].copy()
+    # Replace NaN with a default color before converting to string
+    colors = colors.fillna('#d3d3d3')  # Default gray color
+    colors = colors.astype(str)
+    # Also handle any remaining 'nan' strings or empty strings
+    colors = colors.replace(['nan', 'NaN', 'NA', ''], '#d3d3d3')
+
+    # Extract geoUnit column for labeling (if available)
+    geo_units = None
+    if 'geoUnit' in soil_table.columns:
+        geo_units = soil_table['geoUnit'].copy()
+        geo_units = geo_units.fillna('')  # Replace NaN with empty string
+        geo_units = geo_units.astype(str)
+        print(f"Found geoUnit column with {geo_units.notna().sum()} entries")
+    else:
+        print(f"Warning: No geoUnit column found in soil table")
+
+    # Debug: Check data types and sample values
+    print(f"  z_top: {z_top_lat.dtype}, non-null: {z_top_lat.notna().sum()}/{len(z_top_lat)}")
+    print(f"  qc: {qc_pa.dtype}, non-null: {qc_pa.notna().sum()}/{len(qc_pa)}")
+    if len(z_top_lat) > 0:
+        print(f"  Sample z_top[0]: {z_top_lat.iloc[0]}")
+        print(f"  Sample qc[0]: {qc_pa.iloc[0]}")
+
+    # Convert depth: subtract zSeabed elevation to get depth below seabed
+    if len(z_top_lat) == 0:
+        print("Error: No soil layers found")
+        return
+
+    # Filter out rows where z_top or qc are NaN before processing
+    valid_initial = z_top_lat.notna() & qc_pa.notna()
+    print(f"  Valid rows (both z_top and qc present): {valid_initial.sum()}/{len(valid_initial)}")
+
+    z_top_lat = z_top_lat[valid_initial]
+    qc_pa = qc_pa[valid_initial]
+    colors = colors[valid_initial]
+    if geo_units is not None:
+        geo_units = geo_units[valid_initial]
+
+    if len(z_top_lat) == 0:
+        print("Error: No valid z_top or qc data found")
+        return
+
+    # Use zSeabed from position_data if available, otherwise use first layer elevation
+    if zSeabed is not None:
+        seabed_elevation = zSeabed
+        print(f"  Using zSeabed from position_data: {seabed_elevation} m")
+    else:
+        seabed_elevation = z_top_lat.iloc[0]
+        print(f"  Using first layer elevation as seabed: {seabed_elevation} m")
+
+    depth_below_seabed = seabed_elevation - z_top_lat  # Positive depth below seabed
+
+    # Convert qc from Pa to MPa
+    qc_mpa = qc_pa / 1e6
+
+    # Filter to only include layers below seabed (positive depth) and valid qc
+    valid_mask = (depth_below_seabed >= 0) & (qc_mpa > 0)
+    print(f"  Layers below seabed with valid qc: {valid_mask.sum()}/{len(valid_mask)}")
+
+    depth_below_seabed = depth_below_seabed[valid_mask]
+    qc_mpa = qc_mpa[valid_mask]
+    colors = colors[valid_mask]
+    if geo_units is not None:
+        geo_units = geo_units[valid_mask]
+
+    if len(depth_below_seabed) == 0:
+        print("Error: No valid soil data to plot below seabed")
+        return
+
+    print(f"Plotting {len(depth_below_seabed)} soil layers")
+    print(f"Depth range: {depth_below_seabed.min():.2f} to {depth_below_seabed.max():.2f} m")
+    print(f"qc range: {qc_mpa.min():.2f} to {qc_mpa.max():.2f} MPa")
+
+    # Get the max qc value to set plot range
+    max_qc = qc_mpa.max()
+
+    # Create figure
+    fig = go.Figure()
+
+    # Build step plot data with constant qc within each layer
+    # Each layer has same qc at top and bottom
+    qc_step = []
+    depth_step = []
+
+    for i in range(len(depth_below_seabed) - 1):
+        depth_start = depth_below_seabed.iloc[i]
+        depth_end = depth_below_seabed.iloc[i + 1]
+        qc_value = qc_mpa.iloc[i]
+
+        # Add points for constant qc within layer (horizontal line)
+        qc_step.extend([qc_value, qc_value])
+        depth_step.extend([depth_start, depth_end])
+
+    # Add last layer (extends to end)
+    if len(depth_below_seabed) > 0:
+        qc_step.append(qc_mpa.iloc[-1])
+        depth_step.append(depth_below_seabed.iloc[-1])
+
+    # Plot each layer as a separate trace with its own background color spanning full width
+    for i in range(len(depth_below_seabed) - 1):
+        # Get depth range for this layer (from current to next layer)
+        depth_start = depth_below_seabed.iloc[i]
+        depth_end = depth_below_seabed.iloc[i + 1]
+        layer_color = str(colors.iloc[i])  # Ensure it's a string
+
+        # Validate color (ensure it starts with # for hex colors)
+        if not layer_color.startswith('#') and not layer_color.startswith('rgb'):
+            layer_color = '#d3d3d3'  # Default gray
+
+        print(f"  Layer {i}: depth {depth_start:.2f}-{depth_end:.2f} m, qc: {qc_mpa.iloc[i]:.2f} MPa, color: {layer_color}")
+
+        # Add a filled rectangle spanning full width for this layer's background
+        fig.add_trace(go.Scatter(
+            x=[0, max_qc * 1.1, max_qc * 1.1, 0, 0],  # Full width from 0 to max qc + 10%
+            y=[depth_start, depth_start, depth_end, depth_end, depth_start],
+            fill='toself',
+            fillcolor=layer_color,
+            mode='none',
+            showlegend=False,
+            hoverinfo='skip'
+        ))
+
+    # Add the main qc profile line on top (step plot with constant qc per layer)
+    fig.add_trace(go.Scatter(
+        x=qc_step,
+        y=depth_step,
+        mode='lines',
+        name='qc Profile',
+        line=dict(color='black', width=2),
+        hovertemplate='<b>Depth: %{y:.2f} m bsf</b><br>qc: %{x:.2f} MPa<br><extra></extra>'
+    ))
+
+    # Add geoUnit labels for contiguous zones (if geoUnit column exists)
+    if geo_units is not None and len(geo_units) > 0:
+        print(f"\nIdentifying contiguous geoUnit zones for labeling...")
+
+        # Reset index for easier iteration
+        geo_units_reset = geo_units.reset_index(drop=True)
+        depth_reset = depth_below_seabed.reset_index(drop=True)
+
+        # Identify contiguous zones where the same geoUnit appears
+        zones = []  # List of (geoUnit_name, start_depth, end_depth)
+        current_unit = None
+        zone_start = None
+
+        for i in range(len(geo_units_reset)):
+            unit = geo_units_reset.iloc[i]
+            depth = depth_reset.iloc[i]
+
+            # Skip empty or invalid geoUnit names
+            if not unit or unit in ['', 'nan', 'NaN', 'NA']:
+                # Close current zone if any
+                if current_unit is not None:
+                    zones.append((current_unit, zone_start, depth))
+                    current_unit = None
+                    zone_start = None
+                continue
+
+            # Start new zone or continue current zone
+            if unit != current_unit:
+                # Close previous zone if any
+                if current_unit is not None:
+                    zones.append((current_unit, zone_start, depth))
+
+                # Start new zone
+                current_unit = unit
+                zone_start = depth
+
+        # Close the last zone (extends to the bottom of the last layer)
+        if current_unit is not None and len(depth_reset) > 0:
+            # Get the bottom of the last layer
+            last_depth = depth_reset.iloc[-1]
+            zones.append((current_unit, zone_start, last_depth))
+
+        print(f"  Found {len(zones)} contiguous geoUnit zones")
+
+        # Add text annotations for each zone (at top of zone, right side, no box)
+        for unit_name, start_depth, end_depth in zones:
+            print(f"    Zone: {unit_name} from {start_depth:.2f} to {end_depth:.2f} m (label at top: {start_depth:.2f} m)")
+
+            # Add text annotation on the right side of the plot, at the top of each zone
+            fig.add_annotation(
+                x=0.95,  # 95% from left edge (right side)
+                y=start_depth,  # Top of the zone
+                xref='paper',  # x position relative to plot width (0 to 1)
+                yref='y',  # y position in data coordinates (depth)
+                text=f'<b>{unit_name}</b>',
+                showarrow=False,
+                font=dict(size=12, color='black', family='Arial'),
+                xanchor='right',  # Anchor text to the right
+                yanchor='top'  # Anchor text to the top
+            )
+
+    # Update layout - LINEAR scale, not logarithmic
+    fig.update_layout(
+        title=f'Soil Profile - Position {position}',
+        xaxis=dict(
+            title='Cone Resistance qc [MPa]',
+            gridcolor='lightgray',
+            showgrid=True,
+            linecolor='#5a5a5a',
+            linewidth=2,
+            mirror=True,
+            range=[0, max_qc * 1.1]  # Linear scale from 0 to max + 10%
+        ),
+        yaxis=dict(
+            title='Depth below seabed [m]',
+            autorange='reversed',  # Depth increases downward
+            gridcolor='lightgray',
+            showgrid=True,
+            linecolor='#5a5a5a',
+            linewidth=2,
+            mirror=True
+        ),
+        hovermode='closest',
+        template='plotly_white',
+        width=900,
+        height=1000,
+        plot_bgcolor='white',
+        paper_bgcolor='white'
+    )
+
+    # Save plot if output directory is specified
+    if output_dir:
+        output_path = output_dir / f'soil_profile_{position}.html'
+        fig.write_html(str(output_path))
+        print(f"Soil profile plot saved to: {output_path}")
+
+    # Show interactive plot
+    fig.show()
+    print(f"✓ Soil profile plot displayed")
 
 
 def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
@@ -953,10 +1294,11 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         ),
         cells=dict(
             values=[
-                ['Position', 'Monopile Weight [t]', 'Hammer', 'Hammer Weight [t]', 'Target Blowcount Rate [bl/25cm]'],
+                ['Position', 'Monopile Weight [t]', 'Target Penetration Depth [m]', 'Hammer', 'Hammer Weight [t]', 'Target Blowcount Rate [bl/25cm]'],
                 [
                     position,
                     f"{mp_weight:.1f}" if mp_weight is not None else '',
+                    f"{position_info.get('target_penetration_depth', '')}",
                     position_info.get('hammer_name', ''),
                     f"{position_info.get('hammer_weight', '')}",
                     f"{position_info.get('target_blowcount_rate', '')}"
@@ -1288,6 +1630,24 @@ def main():
             monopile_weights=get_monopile_weights(MONOPILE_WEIGHTS_FILE, [position]),
             position_info=get_position_info(tables, position, selected_methods, selected_bounds)
         )
+
+        # Plot Soil Profile from input position file (independent of driveability plot)
+        try:
+            # Find the input position CSV file in the monopile directory
+            position_dir = MONOPILE_ROOT_DIR / position
+            input_files = list(position_dir.glob(f'input_Position_*_{position}.csv'))
+
+            if input_files:
+                input_file = input_files[0]  # Take the first match
+                print(f"\nFound input position file: {input_file.name}")
+                plot_soil_profile(position=position, input_file_path=input_file, output_dir=PLOTS_OUTPUT_DIR)
+            else:
+                print(f"\nWarning: No input position file found for {position}")
+                print(f"  Searched in: {position_dir}")
+                print(f"  Pattern: input_Position_*_{position}.csv")
+        except Exception as e:
+            print(f"\nError plotting soil profile for {position}: {e}")
+            print("Continuing with next position...")
 
 
 if __name__ == "__main__":
