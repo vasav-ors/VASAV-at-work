@@ -19,6 +19,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 import re
 from typing import Dict, List, Tuple, Optional
+from decimal import Decimal, ROUND_HALF_UP
 from plotly.subplots import make_subplots
 
 # --- USER CONFIGURABLE CONSTANTS ---
@@ -30,16 +31,22 @@ HAMMER_WEIGHT = 736 # weight of hammer in t
 ADDITIONAL_WEIGHT = 20 # any additional weight in MP like flange and pins for secondary attachments int
 
 # USER DEFINED CONSTANT FOR MONOPILE WEIGHTS FILE
-MONOPILE_WEIGHTS_FILE = r"C:/Users/vasav/PyCharmProjects/VASAV-at-work/HOW03/summary-01_Primary_Steel_Design_Verification_25yr.xls"
+MONOPILE_WEIGHTS_FILE = Path(r"k:/dozr/HOW03/PS/MP/20250912 - Design documentation for Certification - Rev. C/variations/01_Primary_Steel_Design_Verification_25yr/summary/data_summary/summary-01_Primary_Steel_Design_Verification_25yr.xls")
 
 # USER DEFINED CONSTANT FOR MONOPILE ROOT DIRECTORY
-MONOPILE_ROOT_DIR = Path(r""
-                         r"K:/DOZR/HOW03/GEO/05_Driveability/20241108_Cleaned_Const_blow/variations/const_blow_0.25m_intrvl_200bl_limit/monopiles")
+MONOPILE_ROOT_DIR = Path(r"k:/dozr/HOW03/GEO/05_Driveability/20260106_Final for Installation/variations/02_ConstBlow/monopiles")
 
 # USER DEFINED CONSTANT FOR OUTPUT DIRECTORY WHERE PLOTS ARE SAVED
-PLOTS_OUTPUT_DIR = MONOPILE_ROOT_DIR / "plots"
+PLOTS_OUTPUT_DIR = Path(r"k:\dozr\HOW03\GEO\05_Driveability\20260106_Final for Installation\variations\02_ConstBlow\summary\post_processing_plots")
 
+# USER DEFINED CONSTANTS FOR GRIPPER PENETRATION DATA
+GRIPPER_PENETRATION_DIR = r"K:\dozr\HOW03\GEO\04_OptiMon Runs\20251017_Lateral_pile_stability_ Installation\post-processing"
+GRIPPER_PENETRATION_FILE = "HOW03_minL_load_iter3.xlsm"
+GRIPPER_PENETRATION_SHEET = "Summary 05_combined"
 
+# USER DEFINED CONSTANTS FOR REFUSAL RISK ASSESSMENT DATA
+REFUSAL_RISK_DIR = r"K:\dozr\HOW03\GEO\05_Driveability\20260106_Final for Installation\postprocessing"
+REFUSAL_RISK_FILE = "Data_Summary_setup.xlsx"
 # -----------------------------------
 
 
@@ -333,6 +340,288 @@ def get_position_info(position_tables, position, selected_methods=None, selected
             info['target_penetration_depth'] = float(val)
 
     return info
+
+
+def get_gripper_penetration_for_positions(positions: List[str]) -> tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Read minimum penetration data from Excel file for SPECIFIC positions only.
+
+    Reads two types of penetration data:
+    1. Gripper release: Lmin_Hs2_5 (SLS,ULS)
+    2. MP abandonment: Lmin_Hs7_3 (SLS,ULS)
+
+    This function is called AFTER position selection to read only the required data,
+    making it more efficient than loading all positions upfront.
+
+    Args:
+        positions: List of position names to read data for (e.g., ['A01', 'A02'])
+
+    Returns:
+        Tuple of two dictionaries:
+        - gripper_data: Dictionary mapping position names to gripper release penetration depths
+        - abandonment_data: Dictionary mapping position names to MP abandonment penetration depths
+        Returns empty dictionaries if file not found or any error occurs.
+    """
+    if not positions:
+        return {}, {}
+
+    try:
+        # Construct full path to Excel file
+        excel_path = Path(GRIPPER_PENETRATION_DIR) / GRIPPER_PENETRATION_FILE
+
+        if not excel_path.exists():
+            print(f"Info: Penetration data file not found at {excel_path}. Skipping penetration data.")
+            return {}, {}
+
+        print(f"Reading penetration data for {len(positions)} selected position(s)...")
+
+        # Read the Excel file, starting from row 18 (0-indexed row 17)
+        # Row 18 contains headers, row 19 contains units, data starts at row 20
+        df = pd.read_excel(excel_path, sheet_name=GRIPPER_PENETRATION_SHEET, header=17)
+
+        # Remove the units row (first row after header)
+        df = df.iloc[1:].reset_index(drop=True)
+
+        # Check if required columns exist
+        if 'Position' not in df.columns:
+            print(f"Warning: 'Position' column not found in {GRIPPER_PENETRATION_SHEET}. Skipping penetration data.")
+            return {}, {}
+
+        # Column names may have newline character due to Excel formatting
+        # Find gripper release column (Hs2_5)
+        gripper_col = 'Lmin_Hs2_5 (SLS,ULS)'
+        if gripper_col not in df.columns:
+            # Try with newline character
+            gripper_col = 'Lmin_Hs2_5\n(SLS,ULS)'
+            if gripper_col not in df.columns:
+                print(f"Warning: Column 'Lmin_Hs2_5 (SLS,ULS)' not found in {GRIPPER_PENETRATION_SHEET}.")
+                gripper_col = None
+
+        # Find MP abandonment column (Hs7_3)
+        abandonment_col = 'Lmin_Hs7_3 (SLS,ULS)'
+        if abandonment_col not in df.columns:
+            # Try with newline character
+            abandonment_col = 'Lmin_Hs7_3\n(SLS,ULS)'
+            if abandonment_col not in df.columns:
+                print(f"Warning: Column 'Lmin_Hs7_3 (SLS,ULS)' not found in {GRIPPER_PENETRATION_SHEET}.")
+                abandonment_col = None
+
+        if not gripper_col and not abandonment_col:
+            print(f"Warning: No penetration columns found. Skipping penetration data.")
+            return {}, {}
+
+        # Filter dataframe to only include selected positions
+        df_filtered = df[df['Position'].isin(positions)]
+
+        # Build dictionaries of position -> penetration depth (only for selected positions)
+        gripper_data = {}
+        abandonment_data = {}
+
+        for idx, row in df_filtered.iterrows():
+            pos = row.get('Position')
+
+            if pd.notna(pos):
+                # Read gripper release data
+                if gripper_col:
+                    val = row.get(gripper_col)
+                    if pd.notna(val):
+                        try:
+                            gripper_data[str(pos)] = float(val)
+                        except (ValueError, TypeError):
+                            pass  # Skip if value cannot be converted
+
+                # Read MP abandonment data
+                if abandonment_col:
+                    val = row.get(abandonment_col)
+                    if pd.notna(val):
+                        try:
+                            abandonment_data[str(pos)] = float(val)
+                        except (ValueError, TypeError):
+                            pass  # Skip if value cannot be converted
+
+        # Report what was loaded
+        if gripper_data or abandonment_data:
+            msg_parts = []
+            if gripper_data:
+                msg_parts.append(f"gripper release: {len(gripper_data)}/{len(positions)}")
+            if abandonment_data:
+                msg_parts.append(f"MP abandonment: {len(abandonment_data)}/{len(positions)}")
+            print(f"  ✓ Loaded penetration data - {', '.join(msg_parts)}")
+        else:
+            print(f"  Warning: No valid penetration data found for selected positions")
+
+        return gripper_data, abandonment_data
+
+    except Exception as e:
+        print(f"Warning: Error reading penetration data: {e}. Skipping penetration data.")
+        return {}, {}
+
+
+def get_refusal_risk_for_positions(positions: List[str], selected_methods: List[str],
+                                    target_depths: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+    """
+    Read refusal risk depth data from Excel file for specific positions and installation pause durations.
+
+    Reads refusal risk assessment data from sheets named: '1 hr', '24 hr', '48 hr', '7 days'
+
+    For each sheet:
+    - First 3 rows are header (row 1: Position/difference, row 2: all/<SRD method>, row 3: text/<soil bound>)
+    - Data starts from row 4 onwards
+    - Find the position row and the column matching the selected SRD method
+    - The value represents how far ABOVE target depth the refusal occurs (negative number)
+    - Calculate actual refusal depth as: target_depth + difference
+
+    Args:
+        positions: List of position names to read data for
+        selected_methods: List of selected SRD methods (e.g., ['MD', 'AH'])
+        target_depths: Dictionary mapping position names to target penetration depths
+
+    Returns:
+        Nested dictionary:
+        {
+            'position_name': {
+                '1hr': depth_value,
+                '24hr': depth_value,
+                '48hr': depth_value,
+                '7days': depth_value
+            }
+        }
+        Returns empty dict if file not found or any error occurs.
+    """
+    if not positions:
+        return {}
+
+    try:
+        # Construct full path to Excel file
+        excel_path = Path(REFUSAL_RISK_DIR) / REFUSAL_RISK_FILE
+
+        if not excel_path.exists():
+            print(f"Info: Refusal risk data file not found at {excel_path}. Skipping refusal risk data.")
+            return {}
+
+        print(f"Reading refusal risk data for {len(positions)} selected position(s)...")
+
+        # Sheet names mapping
+        sheet_mapping = {
+            '1hr': '1 hr',
+            '24hr': '24 hr',
+            '48hr': '48 hr',
+            '7days': '7 days'
+        }
+
+        # Method name mapping (from short codes to expected column headers)
+        method_mapping = {
+            'MD': 'MD',
+            'MY': 'Maynard',
+            'AH': 'AH'
+        }
+
+        # Initialize results dictionary
+        refusal_data = {pos: {} for pos in positions}
+
+        # Read each sheet
+        for duration_key, sheet_name in sheet_mapping.items():
+            try:
+                # Read the sheet (first 3 rows are header)
+                df = pd.read_excel(excel_path, sheet_name=sheet_name, header=None)
+
+                if df.empty or len(df) < 4:
+                    print(f"  Warning: Sheet '{sheet_name}' is empty or too short. Skipping.")
+                    continue
+
+                # Row 0: Contains 'Position' in first column, 'difference' and other headers
+                # Row 1: Contains 'all' in first column, SRD method names in other columns
+                # Row 2: Contains 'text' in first column, soil bounds (be/lb/ub) in other columns
+                # Row 3+: Data rows
+
+                header_row1 = df.iloc[0]  # Position / difference
+                header_row2 = df.iloc[1]  # all / SRD methods
+                header_row3 = df.iloc[2]  # text / soil bounds
+
+                # Find 'Position' column (should be first column)
+                position_col_idx = 0
+
+                # Find columns that match selected methods (any soil bound)
+                # We look in row 1 for method names and check if they match our selected methods
+                method_columns = {}  # {method_short: [col_indices]}
+
+                for col_idx in range(1, len(header_row2)):
+                    method_in_header = str(header_row2.iloc[col_idx]).strip()
+
+                    # Check if this column matches any of our selected methods
+                    for method_short, method_name in method_mapping.items():
+                        if method_short in selected_methods:
+                            if method_name.lower() in method_in_header.lower():
+                                if method_short not in method_columns:
+                                    method_columns[method_short] = []
+                                method_columns[method_short].append(col_idx)
+
+                if not method_columns:
+                    print(f"  Warning: No matching methods found in sheet '{sheet_name}'. Skipping.")
+                    continue
+
+                # Process each position
+                for pos in positions:
+                    # Find the row for this position (starting from row 3, index 3)
+                    position_row_idx = None
+                    for row_idx in range(3, len(df)):
+                        if str(df.iloc[row_idx, position_col_idx]).strip() == pos:
+                            position_row_idx = row_idx
+                            break
+
+                    if position_row_idx is None:
+                        continue  # Position not found in this sheet
+
+                    # Get target depth for this position
+                    target_depth = target_depths.get(pos)
+                    if target_depth is None:
+                        continue  # No target depth available
+
+                    # Extract difference values for all selected methods
+                    # Take the first matching column for each method (typically 'be' bound)
+                    differences = []
+                    for method_short, col_indices in method_columns.items():
+                        if col_indices:
+                            val = df.iloc[position_row_idx, col_indices[0]]
+                            if pd.notna(val):
+                                try:
+                                    diff_value = float(val)
+                                    differences.append(diff_value)
+                                except (ValueError, TypeError):
+                                    pass
+
+                    # If we have valid differences, take the MOST CONSERVATIVE (most negative/shallowest)
+                    # This represents the earliest refusal risk across all selected SRD methods
+                    # The difference is negative (distance above target), so we add it to target
+                    # Only show "No risk" if ALL methods show 0 difference (all safe)
+                    if differences:
+                        # Take the minimum (most negative) difference = most conservative = earliest refusal
+                        most_conservative_diff = min(differences)
+                        # Only mark as "No risk" if the most conservative value is 0
+                        # (meaning all values are >= 0, i.e., all methods show no risk)
+                        if most_conservative_diff == 0:
+                            refusal_data[pos][duration_key] = "No risk"
+                        else:
+                            # Calculate refusal depth using most conservative difference
+                            refusal_depth = target_depth + most_conservative_diff
+                            refusal_data[pos][duration_key] = refusal_depth
+
+            except Exception as e:
+                print(f"  Warning: Error reading sheet '{sheet_name}': {e}")
+                continue
+
+        # Report what was loaded
+        loaded_count = sum(1 for pos_data in refusal_data.values() if pos_data)
+        if loaded_count > 0:
+            print(f"  ✓ Loaded refusal risk data for {loaded_count}/{len(positions)} position(s)")
+        else:
+            print(f"  Warning: No valid refusal risk data found for selected positions")
+
+        return refusal_data
+
+    except Exception as e:
+        print(f"Warning: Error reading refusal risk data: {e}. Skipping refusal risk data.")
+        return {}
 
 
 def calculate_swp_and_pile_run_assessment(
@@ -1040,7 +1329,10 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                       output_dir: Path = None,
                       monopile_weights: dict = None,
                       position_info: dict = None,
-                      soil_profile_data: dict = None):
+                      soil_profile_data: dict = None,
+                      gripper_data: dict = None,
+                      abandonment_data: dict = None,
+                      refusal_data: dict = None):
     """
     Plot Rut vs Depth for selected methods and bounds using Plotly (interactive).
     Each method gets a unique color, each bound gets a unique line style.
@@ -1051,6 +1343,9 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         soil_profile_data: Optional dict with soil profile data to overlay on SRD plot.
                           Should contain keys: depth_below_seabed, qc_mpa, colors, qc_step,
                           depth_step, max_qc, geo_unit_zones
+        gripper_data: Optional dict mapping position names to minimum penetration for gripper release
+        abandonment_data: Optional dict mapping position names to minimum penetration for MP abandonment
+        refusal_data: Optional dict mapping position names to refusal risk depths for different pause durations
     """
     # Extract target depth from summary table
     target_depth = None
@@ -1446,7 +1741,60 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
     # ===============================================================================
 
     # --- Info panel table in row 1, col 4 ---
+    # Get gripper penetration value for this position (if available)
+    # Use decimal module to avoid banker's rounding (round half up instead of round half to even)
+    gripper_penetration = ''
+    if gripper_data and position in gripper_data:
+        # Round using ROUND_HALF_UP to avoid banker's rounding (e.g., 16.95 → 17.0)
+        rounded_val = float(Decimal(str(gripper_data[position])).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+        gripper_penetration = f"{rounded_val:.1f}"
+
+    # Get MP abandonment penetration value for this position (if available)
+    # Use decimal module to avoid banker's rounding
+    abandonment_penetration = ''
+    if abandonment_data and position in abandonment_data:
+        # Round using ROUND_HALF_UP to avoid banker's rounding
+        rounded_val = float(Decimal(str(abandonment_data[position])).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+        abandonment_penetration = f"{rounded_val:.1f}"
+
+    # Get refusal risk depths for this position (if available)
+    refusal_1hr = ''
+    refusal_24hr = ''
+    refusal_48hr = ''
+    refusal_7days = ''
+    if refusal_data and position in refusal_data:
+        pos_refusal = refusal_data[position]
+        if '1hr' in pos_refusal:
+            val = pos_refusal['1hr']
+            if val == "No risk":
+                refusal_1hr = "No risk"
+            else:
+                rounded_val = float(Decimal(str(val)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+                refusal_1hr = f"{rounded_val:.1f}"
+        if '24hr' in pos_refusal:
+            val = pos_refusal['24hr']
+            if val == "No risk":
+                refusal_24hr = "No risk"
+            else:
+                rounded_val = float(Decimal(str(val)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+                refusal_24hr = f"{rounded_val:.1f}"
+        if '48hr' in pos_refusal:
+            val = pos_refusal['48hr']
+            if val == "No risk":
+                refusal_48hr = "No risk"
+            else:
+                rounded_val = float(Decimal(str(val)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+                refusal_48hr = f"{rounded_val:.1f}"
+        if '7days' in pos_refusal:
+            val = pos_refusal['7days']
+            if val == "No risk":
+                refusal_7days = "No risk"
+            else:
+                rounded_val = float(Decimal(str(val)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
+                refusal_7days = f"{rounded_val:.1f}"
+
     info_table = go.Table(
+        columnwidth=[0.7, 0.3],
         header=dict(
             values=['<b>Info</b>', '<b>Value</b>'],
             fill_color='#b3c6e7',
@@ -1455,17 +1803,28 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         ),
         cells=dict(
             values=[
-                ['Position', 'Monopile Weight [t]', 'Target Penetration Depth [m]', 'Hammer', 'Hammer Weight [t]', 'Target Blowcount Rate [bl/25cm]'],
+                ['Position', 'Monopile Weight [t]', 'Target Penetration Depth [m]', 'Hammer', 'Hammer Weight [t]', 'Target Blowcount Rate [bl/25cm]', 'Min. Penetration for Gripper release [m]', 'Min. Penetration for MP abandonment [m]', '1hr instal. pause - Refusal risk depth [m]', '24hr instal. pause - Refusal risk depth [m]', '48hr instal. pause - Refusal risk depth [m]', '7days instal. pause - Refusal risk depth [m]'],
                 [
                     position,
                     f"{mp_weight:.1f}" if mp_weight is not None else '',
                     f"{position_info.get('target_penetration_depth', '')}",
                     position_info.get('hammer_name', ''),
                     f"{position_info.get('hammer_weight', '')}",
-                    f"{position_info.get('target_blowcount_rate', '')}"
+                    f"{position_info.get('target_blowcount_rate', '')}",
+                    gripper_penetration,
+                    abandonment_penetration,
+                    refusal_1hr,
+                    refusal_24hr,
+                    refusal_48hr,
+                    refusal_7days
                 ]
             ],
-            fill_color='white',
+            # Use different background colors: white for general info and refusal risk, light blue for minimum penetration rows
+            # Provide colors for each column: [column1_colors, column2_colors]
+            fill_color=[
+                ['white', 'white', 'white', 'white', 'white', 'white', '#e6f2ff', '#e6f2ff', 'white', 'white', 'white', 'white'],  # Info column
+                ['white', 'white', 'white', 'white', 'white', 'white', '#e6f2ff', '#e6f2ff', 'white', 'white', 'white', 'white']   # Value column
+            ],
             align=['left', 'center'],
             font=dict(size=12, color='black', family='Arial'),
             height=30
@@ -1709,17 +2068,26 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 except:
                     pass
 
-        # If we couldn't determine from traces, use target depth + buffer
-        if max_depth == 0:
-            if target_depth:
-                max_depth = target_depth + 5  # Default: 5m below target
-            else:
-                max_depth = 40  # Fallback
+        # Ensure max_depth is at least equal to target depth (so QC plot goes down to target penetration)
+        if target_depth:
+            if max_depth < target_depth:
+                max_depth = target_depth
+        elif max_depth == 0:
+            # Fallback if no data and no target depth
+            max_depth = 40
 
         print(f"  Using max depth: {max_depth:.2f} m for soil profile overlay")
 
         # Filter soil layers and qc data to only show up to max_depth
         depth_below_seabed_filtered = depth_below_seabed[depth_below_seabed <= max_depth]
+
+        # Ensure depth_below_seabed_filtered includes max_depth for proper layer extension
+        if len(depth_below_seabed_filtered) > 0 and depth_below_seabed_filtered.iloc[-1] < max_depth:
+            # Add max_depth as a final point
+            depth_below_seabed_filtered = pd.concat([
+                depth_below_seabed_filtered,
+                pd.Series([max_depth])
+            ]).reset_index(drop=True)
 
         # Filter qc step data
         qc_step_filtered = []
@@ -1728,6 +2096,12 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             if d <= max_depth:
                 qc_step_filtered.append(qc_step[i])
                 depth_step_filtered.append(d)
+
+        # Extend QC profile to max_depth if the last data point is shallower than max_depth
+        if len(depth_step_filtered) > 0 and depth_step_filtered[-1] < max_depth:
+            # Add the last qc value extended to max_depth
+            qc_step_filtered.append(qc_step_filtered[-1])
+            depth_step_filtered.append(max_depth)
 
         # Add soil layer backgrounds as shapes to ONLY the first subplot (row 1, col 1)
         # This provides geological context without making other plots too visually heavy
@@ -1760,27 +2134,33 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             )
 
         # Add the last layer extending to the bottom of the subplot (max_depth)
+        # This handles the case where we extended depth_below_seabed_filtered to max_depth
+        # but colors array doesn't have a corresponding entry
         if len(depth_below_seabed_filtered) > 0 and len(colors) > 0:
-            last_depth = depth_below_seabed_filtered.iloc[-1]
-            last_color = str(colors.iloc[min(len(depth_below_seabed_filtered) - 1, len(colors) - 1)])
+            # Find the last depth that has a corresponding color
+            last_colored_index = min(len(colors) - 1, len(depth_below_seabed_filtered) - 2)
+            if last_colored_index >= 0 and last_colored_index < len(depth_below_seabed_filtered) - 1:
+                last_depth = depth_below_seabed_filtered.iloc[last_colored_index + 1]
+                last_color = str(colors.iloc[last_colored_index])
 
-            if not last_color.startswith('#') and not last_color.startswith('rgb'):
-                last_color = '#d3d3d3'
+                if not last_color.startswith('#') and not last_color.startswith('rgb'):
+                    last_color = '#d3d3d3'
 
-            # Extend the last layer color to the bottom of the plot
-            fig.add_shape(
-                type="rect",
-                xref="x domain",
-                yref="y",
-                x0=0,
-                x1=1,
-                y0=last_depth,
-                y1=max_depth,  # Extend to bottom of subplot
-                fillcolor=last_color,
-                line=dict(width=0),
-                layer="below",
-                row=1, col=1
-            )
+                # Extend the last layer color to the bottom of the plot
+                if last_depth < max_depth:
+                    fig.add_shape(
+                        type="rect",
+                        xref="x domain",
+                        yref="y",
+                        x0=0,
+                        x1=1,
+                        y0=last_depth,
+                        y1=max_depth,  # Extend to bottom of subplot
+                        fillcolor=last_color,
+                        line=dict(width=0),
+                        layer="below",
+                        row=1, col=1
+                    )
 
         # Add qc step plot trace using the secondary axis (grey line)
         # IMPORTANT: Don't use row/col parameters to preserve axis references
@@ -1907,11 +2287,17 @@ def main():
     else:
         selected_positions = [p.strip().upper() for p in selected_positions_input.split(',') if p.strip()]
 
+    # Load penetration data ONLY for selected positions (efficient!)
+    # Returns two dictionaries: gripper release and MP abandonment
+    gripper_data, abandonment_data = get_gripper_penetration_for_positions(selected_positions)
+
     # Now only parse CSV files for SELECTED positions (much faster!)
     print(f"\nParsing data for {len(selected_positions)} selected position(s)...")
     all_methods = set()
     all_bounds = set()
     position_tables = {}
+    target_depths = {}  # Store target depths for refusal risk calculation
+
     for p_name, p_path in positions:
         if p_name not in selected_positions:
             continue  # Skip positions not selected
@@ -1923,6 +2309,14 @@ def main():
             methods, bounds = get_available_methods_and_bounds(tables)
             all_methods.update(methods)
             all_bounds.update(bounds)
+
+            # Extract target depth for this position (needed for refusal risk calculation)
+            summary_table = tables.get('results_PileDrivingAnalysis_Summary')
+            if summary_table is not None and 'targetdepth' in summary_table.columns:
+                try:
+                    target_depths[p_name] = float(pd.to_numeric(summary_table['targetdepth'].iloc[0]))
+                except (ValueError, IndexError):
+                    pass
 
     methods = sorted(list(all_methods))
     bounds = sorted(list(all_bounds))
@@ -1951,6 +2345,10 @@ def main():
         selected_bounds = [b.strip().lower() for b in selected_bounds_input.split(',') if b.strip()]
 
     print(f"Selected bounds: {selected_bounds}")
+
+    # Load refusal risk data for selected positions and methods (efficient!)
+    # This reads from the Excel file sheets: '1 hr', '24 hr', '48 hr', '7 days'
+    refusal_data = get_refusal_risk_for_positions(selected_positions, selected_methods, target_depths)
 
     # --- MAIN LOOP: Process each selected position ---
     for position in selected_positions:
@@ -1981,7 +2379,10 @@ def main():
             output_dir=PLOTS_OUTPUT_DIR,
             monopile_weights=get_monopile_weights(MONOPILE_WEIGHTS_FILE, [position]),
             position_info=get_position_info(tables, position, selected_methods, selected_bounds),
-            soil_profile_data=soil_profile_data
+            soil_profile_data=soil_profile_data,
+            gripper_data=gripper_data,
+            abandonment_data=abandonment_data,
+            refusal_data=refusal_data
         )
 
 
