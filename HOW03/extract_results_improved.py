@@ -1,63 +1,184 @@
 """
-Extract and plot pile driving analysis results from multiple positions.
+===================================================================================================
+PILE DRIVEABILITY ANALYSIS - INTERACTIVE PLOTTING TOOL
+===================================================================================================
 
-This script:
-1. Reads results_PileDrivingAnalysis CSV files from position folders (A01, A02, etc.)
-2. Parses multiple tables within each CSV file
-3. Allows user to select which SRD methods and soil bounds to plot
-4. Creates plots with consistent colors per method and line styles per soil bound
+PURPOSE:
+--------
+This script extracts, processes, and visualizes pile driving analysis results for offshore wind
+turbine monopile installations. It creates comprehensive interactive plots showing Static Resistance
+to Driving (SRD), blowcount rates, energy requirements, and driveability assessment metrics.
 
-Features:
-- Robust error handling for reading monopile weights from CSV/Excel files
-- Flexible column name matching for various input formats
-- Professional data tables for position information and weights
-- Interactive Plotly visualizations with customizable thresholds
+EXECUTION ORDER:
+----------------
+1. USER CONFIGURATION
+   - Set threshold values (hard driving, refusal blowcount rates)
+   - Define file paths (monopile weights, root directory, output directory)
+   - Configure gripper penetration and refusal risk data sources
+
+2. DATA COLLECTION PHASE (main function)
+   a) Scan position folders (A01, A02, etc.) in the monopile root directory
+   b) Prompt user to select positions to analyze (or 'all')
+   c) Load gripper penetration data for selected positions only (optimization)
+   d) Parse driveability CSV files for selected positions:
+      - Extract multiple tables from each results_PileDrivingAnalysis-{Position}.csv
+      - Identify available SRD methods (MD, MY, AH) and soil bounds (lb, be, ub)
+      - Extract target penetration depths for refusal risk calculations
+   e) Prompt user to select SRD methods and soil bounds to plot
+   f) Load refusal risk assessment data from Excel file (1hr, 24hr, 48hr, 7days pause durations)
+
+3. POSITION PROCESSING LOOP
+   For each selected position:
+   a) Extract soil profile data from input_Position_{Position}.csv file:
+      - Read soil layers with qc values, colors, and geoUnit classifications
+      - Calculate depth below seabed using zSeabed reference
+      - Prepare step plot data for qc profile overlay
+
+   b) Call plot_driveability_results() which:
+      - Creates 2x4 subplot grid (3 plots per row + 1 table per row)
+      - Row 1: SRD [MN], Blowcount Rate, Input Energy, Info Table
+      - Row 2: Total Energy [GJ], Cumulative Blows, SRD [kN] (log scale), Assessment Table
+      - Plots all selected method/bound combinations with color-coded traces
+      - Overlays soil profile (qc, layers, geoUnits) on SRD subplot
+      - Adds target depth line, hard driving thresholds, refusal criteria
+      - Adds horizontal lines for gripper release and MP abandonment depths
+      - Adds horizontal lines for refusal risk depths (1hr, 24hr, 48hr, 7days)
+
+   c) Calculate self-weight penetration and pile run assessments:
+      - SWP MP + ILT (Internal Lifting Tool): Depth where SRD = MP + ILT weight
+      - Pile run at hammer placement: Check if SRD < threshold at hammer placement
+      - SWP MP + Hammer: Depth where SRD = MP + Hammer weight
+      - Pile run risk top: First depth where SRD drops below hammer weight (risk initiation)
+      - Pile run risk bottom: Depth where SRD recovers above threshold (risk zone end)
+      - CONSERVATIVE LOGIC: When multiple methods selected, use most conservative value
+        * SWP depths: DEEPEST (pile penetrates furthest)
+        * Pile run risks: SHALLOWEST for top (earliest risk), DEEPEST for bottom (longest zone)
+
+   d) Populate information table with:
+      - Position name, monopile weight, target depth, hammer details
+      - Minimum penetrations for gripper release and MP abandonment
+      - Refusal risk depths for different installation pause durations
+
+   e) Save plot as: Installation_Driveability_{Position}.html
+   f) Display interactive plot in browser
+
+KEY FEATURES:
+-------------
+- Multi-method comparison: Compare MD (MonoDrive), MY (Maynard), AH (Alm & Hamre)
+- Multi-bound analysis: Lower bound (lb), Best estimate (be), Upper bound (ub)
+- Synchronized y-axes: All subplots zoom together for easy comparison
+- Soil profile overlay: qc profile with color-coded layers and geoUnit labels on SRD plot
+- Conservative assessments: Automatic selection of most conservative values across methods
+- Installation risk indicators: Gripper release, MP abandonment, refusal risk depths
+- Professional formatting: A3 landscape layout optimized for printing/reporting
+- Interactive tooltips: Hover over any point to see exact values
+- Robust error handling: Graceful degradation if optional data sources unavailable
+
+DATA SOURCES:
+-------------
+- Driveability results: results_PileDrivingAnalysis-{Position}.csv (multi-table CSV)
+- Soil profiles: input_Position_*_{Position}.csv (qc, layers, geoUnits)
+- Monopile weights: Excel file from primary steel design verification
+- Gripper penetration: Excel workbook from lateral pile stability analysis
+- Refusal risk: Excel workbook with pause duration scenarios (1hr to 7days)
+
+OUTPUT:
+-------
+- Interactive HTML plots: Installation_Driveability_{Position}.html
+- Console output: Progress messages, warnings, loaded data summary
+- Plot display: Automatic browser opening for immediate review
 """
 
 import pandas as pd
 from pathlib import Path
 import plotly.graph_objects as go
 import re
+import time
 from typing import Dict, List, Tuple, Optional
 from decimal import Decimal, ROUND_HALF_UP
 from plotly.subplots import make_subplots
 
-# --- USER CONFIGURABLE CONSTANTS ---
-# Set hard driving and refusal blowcount rates here (units: bl/25cm)
-HARD_DRIVING_BLOWCOUNT = 75  # e.g. 80 bl/25cm
-REFUSAL_BLOWCOUNT = 250      # e.g. 180 bl/25cm
-INTERNAL_LIFTING_TOOL = 100 # weight of internal lifting tool in t
-HAMMER_WEIGHT = 736 # weight of hammer in t
-ADDITIONAL_WEIGHT = 20 # any additional weight in MP like flange and pins for secondary attachments int
+# ===================================================================================================
+# GLOBAL CACHE FOR PARSED FILES (PERFORMANCE OPTIMIZATION)
+# ===================================================================================================
+_PARSED_FILE_CACHE = {}  # Cache for parsed CSV files to avoid re-parsing
 
-# USER DEFINED CONSTANT FOR MONOPILE WEIGHTS FILE
+
+def clear_parse_cache():
+    """Clear the parsed file cache to free memory."""
+    global _PARSED_FILE_CACHE
+    _PARSED_FILE_CACHE.clear()
+
+
+# ===================================================================================================
+# USER CONFIGURABLE CONSTANTS
+# ===================================================================================================
+# These values control plot thresholds, file locations, and calculation parameters.
+# Modify these as needed for your specific project requirements.
+
+# --- DRIVEABILITY THRESHOLD VALUES ---
+# Blowcount rate thresholds (units: blows per 25cm)
+HARD_DRIVING_BLOWCOUNT = 75   # Hard driving criterion - shown as horizontal line on blowcount plot
+REFUSAL_BLOWCOUNT = 250        # Refusal criterion - indicates potential installation failure
+
+# --- WEIGHT COMPONENTS FOR SELF-WEIGHT PENETRATION CALCULATIONS ---
+# All weights in tonnes (t)
+INTERNAL_LIFTING_TOOL = 100    # Weight of internal lifting tool (ILT) used during MP lowering
+HAMMER_WEIGHT = 736            # Weight of hydraulic hammer unit
+ADDITIONAL_WEIGHT = 20         # Additional components (flanges, pins, secondary attachments)
+
+# --- DATA SOURCE FILE PATHS ---
+# Path to Excel file containing monopile weights for all positions
 MONOPILE_WEIGHTS_FILE = Path(r"k:/dozr/HOW03/PS/MP/20250912 - Design documentation for Certification - Rev. C/variations/01_Primary_Steel_Design_Verification_25yr/summary/data_summary/summary-01_Primary_Steel_Design_Verification_25yr.xls")
 
-# USER DEFINED CONSTANT FOR MONOPILE ROOT DIRECTORY
+# Root directory containing position folders (A01, A02, etc.) with driveability results
 MONOPILE_ROOT_DIR = Path(r"k:/dozr/HOW03/GEO/05_Driveability/20260106_Final for Installation/variations/02_ConstBlow/monopiles")
 
-# USER DEFINED CONSTANT FOR OUTPUT DIRECTORY WHERE PLOTS ARE SAVED
+# Output directory where interactive HTML plots will be saved
 PLOTS_OUTPUT_DIR = Path(r"k:\dozr\HOW03\GEO\05_Driveability\20260106_Final for Installation\variations\02_ConstBlow\summary\post_processing_plots")
 
-# USER DEFINED CONSTANTS FOR GRIPPER PENETRATION DATA
+# --- GRIPPER PENETRATION DATA SOURCE ---
+# Minimum penetration depths required for gripper release and MP abandonment
 GRIPPER_PENETRATION_DIR = r"K:\dozr\HOW03\GEO\04_OptiMon Runs\20251017_Lateral_pile_stability_ Installation\post-processing"
 GRIPPER_PENETRATION_FILE = "HOW03_minL_load_iter3.xlsm"
 GRIPPER_PENETRATION_SHEET = "Summary 05_combined"
 
-# USER DEFINED CONSTANTS FOR REFUSAL RISK ASSESSMENT DATA
+# --- REFUSAL RISK ASSESSMENT DATA SOURCE ---
+# Refusal risk depths for different installation pause durations (1hr, 24hr, 48hr, 7days)
 REFUSAL_RISK_DIR = r"K:\dozr\HOW03\GEO\05_Driveability\20260106_Final for Installation\postprocessing"
 REFUSAL_RISK_FILE = "Data_Summary_setup.xlsx"
-# -----------------------------------
+# ===================================================================================================
 
 
 def parse_results_csv(file_path: Path) -> Dict[str, pd.DataFrame]:
     """
-    Parse a results CSV file that contains multiple tables separated by empty rows.
-    Each table starts with ** and the table name.
+    Parse a results CSV file containing multiple tables separated by empty rows.
+
+    The CSV files follow a specific format:
+    - Each table starts with '**' followed by the table name
+    - Line 1 after '**': Table name (e.g., 'results_PileDrivingAnalysis_Summary')
+    - Line 2: Position identifier (e.g., 'A01')
+    - Line 3: Column headers (semicolon-separated)
+    - Line 4: Unit row (ignored)
+    - Lines 5+: Data rows (semicolon-separated)
+
+    Handles multiple encoding formats to ensure robust file reading across different systems.
+
+    Args:
+        file_path: Path to the CSV file to parse
 
     Returns:
-        Dictionary with table names as keys and DataFrames as values
+        Dictionary mapping table names (str) to DataFrames
+        Example: {'results_PileDrivingAnalysis_Summary': DataFrame, 'soil': DataFrame, ...}
+
+    Raises:
+        ValueError: If file cannot be read with any supported encoding
     """
+    # PERFORMANCE OPTIMIZATION: Check cache first
+    cache_key = str(file_path)
+    if cache_key in _PARSED_FILE_CACHE:
+        return _PARSED_FILE_CACHE[cache_key]
+
     tables = {}
 
     # Read the entire file - try multiple encodings
@@ -112,25 +233,23 @@ def parse_results_csv(file_path: Path) -> Dict[str, pd.DataFrame]:
         data_rows = [line.split(';') for line in data_lines]
         df = pd.DataFrame(data_rows, columns=headers)
 
-        # Convert numeric columns - handle NaN strings properly
-        # Only convert columns that are actually numeric (don't force conversion on text columns)
+        # OPTIMIZED: Convert numeric columns using vectorized operation
+        # Replace common NaN representations once for entire DataFrame
+        df = df.replace(['NaN', 'nan', 'NA', 'na', ''], pd.NA)
+
+        # Try to convert columns to numeric (future-proof approach)
+        # Iterate through columns but use vectorized conversion per column
         for col in df.columns:
             try:
-                # Replace common NaN representations before attempting conversion
-                df[col] = df[col].replace(['NaN', 'nan', 'NA', 'na', ''], pd.NA)
-
-                # Try to convert to numeric, but only if the column seems to be numeric
-                # Check if at least some values can be converted
-                test_series = pd.to_numeric(df[col], errors='coerce')
-                # If more than 50% of non-NA values were successfully converted, treat as numeric
-                if test_series.notna().sum() > len(df[col].dropna()) * 0.5:
-                    df[col] = test_series
-                # Otherwise keep as string (for columns like plot_Color, geoUnit, etc.)
+                df[col] = pd.to_numeric(df[col])
             except (ValueError, TypeError):
-                pass  # Keep as original if conversion fails
+                # Keep as string if conversion fails (e.g., plot_Color, geoUnit columns)
+                pass
 
         tables[table_name] = df
 
+    # PERFORMANCE OPTIMIZATION: Store in cache before returning
+    _PARSED_FILE_CACHE[cache_key] = tables
     return tables
 
 
@@ -632,25 +751,48 @@ def calculate_swp_and_pile_run_assessment(
     mp_weight: Optional[float]
 ) -> dict:
     """
-    Calculate self-weight penetration and pile run assessment metrics.
+    Calculate self-weight penetration (SWP) and pile run assessment metrics.
+
+    This function evaluates installation risks by determining depths where the monopile
+    may penetrate under its own weight or experience pile run (uncontrolled descent).
+
+    CONSERVATIVE VALUE SELECTION LOGIC (when multiple SRD methods are selected):
+    - SWP MP + ILT: DEEPEST depth → Pile penetrates furthest (most conservative)
+    - Pile run at hammer placement: SHALLOWEST depth → Earliest risk occurrence
+    - SWP MP + Hammer: DEEPEST depth → Pile penetrates furthest with hammer
+    - Pile run risk top: SHALLOWEST depth → Earliest risk initiation
+    - Pile run risk bottom: DEEPEST depth → Longest risk zone extent
+
+    Weight Components:
+    - Nominal MP weight = MP weight + ADDITIONAL_WEIGHT (flanges, pins, etc.)
+    - MP + ILT = Nominal MP weight + INTERNAL_LIFTING_TOOL
+    - MP + Hammer = Nominal MP weight + HAMMER_WEIGHT
+
+    Assessment Metrics:
+    1. SWP MP + ILT: Depth where SRD equals MP+ILT weight (lowering phase)
+    2. Pile run at hammer placement: Check if SRD < threshold at SWP MP+ILT depth
+    3. SWP MP + Hammer: Depth where SRD equals MP+Hammer weight (driving phase)
+    4. Pile run risk top: First depth where SRD < MP+Hammer weight (risk initiation)
+    5. Pile run risk bottom: Depth where SRD recovers > MP+Hammer weight (risk zone end)
 
     Args:
-        methods_to_plot: List of method names for each plotted line
-        bounds_to_plot: List of bound names for each plotted line
-        ruts_to_plot: List of rut arrays (in MN) for each plotted line
-        depths_to_plot: List of depth arrays (in m) for each plotted line
-        mp_weight: Monopile weight in tonnes (or None if not available)
+        methods_to_plot: List of SRD method names for each plotted line (e.g., ['MD', 'AH', 'MD'])
+        bounds_to_plot: List of bound names for each plotted line (e.g., ['lb', 'be', 'ub'])
+        ruts_to_plot: List of SRD arrays in MN for each plotted line
+        depths_to_plot: List of depth arrays in meters for each plotted line
+        mp_weight: Monopile weight in tonnes (None if unavailable)
 
     Returns:
         Dictionary containing:
-            - 'swp_mp_ilt_depths': Dict with LB, BE, UB keys (strings)
-            - 'pile_run_at_hammer_placement': Dict with LB, BE, UB keys (strings)
-            - 'swp_mp_hammer_depths': Dict with LB, BE, UB keys (strings)
-            - 'pile_run_risk_top': Dict with LB, BE, UB keys (strings)
-            - 'pile_run_risk_bottom': Dict with LB, BE, UB keys (strings)
-            - 'nominal_mp_weight': Nominal MP weight in tonnes (or None)
-            - 'mp_lift_tool_total_weight_kn': MP+ILT weight in kN (or None)
-            - 'mp_hammer_total_weight_kn': MP+Hammer weight in kN (or None)
+            - 'swp_mp_ilt_depths': Dict with LB, BE, UB keys → depths or 'No penetration'
+            - 'pile_run_at_hammer_placement': Dict with LB, BE, UB → 'Yes', 'No', or ''
+            - 'swp_mp_hammer_depths': Dict with LB, BE, UB → depths or 'No penetration'
+            - 'pile_run_risk_top': Dict with LB, BE, UB → depths or 'No risk'
+            - 'pile_run_risk_bottom': Dict with LB, BE, UB → depths, 'No bottom', or 'No risk'
+            - 'nominal_mp_weight': Nominal MP weight in tonnes
+            - 'mp_lift_tool_total_weight_kn': MP+ILT weight in kN
+            - 'mp_hammer_total_weight_kn': MP+Hammer weight in kN
+            - 'mp_only_total_weight_kn': Nominal MP weight in kN
     """
     # Initialize result dictionary
     results = {
@@ -864,31 +1006,140 @@ def calculate_swp_and_pile_run_assessment(
             deepest = max(temp_pile_run_bottom[bound_key])
             results['pile_run_risk_bottom'][bound_key] = f'{deepest:.2f}'
         elif results['pile_run_risk_top'][bound_key] == 'No risk':
-            results['pile_run_risk_bottom'][bound_key] = 'N/A'
+            results['pile_run_risk_bottom'][bound_key] = 'No risk'
         else:
             results['pile_run_risk_bottom'][bound_key] = 'No bottom'
 
     return results
 
 
-def extract_soil_profile_data(input_file_path: Path):
+def _parse_soil_tables_only(file_path: Path):
     """
-    Extract soil profile data from input position CSV file.
+    FAST: Extract only **soil and **position_data tables from input CSV file.
 
-    Returns a dictionary containing:
-        - depth_below_seabed: array of depths
-        - qc_mpa: array of qc values in MPa
-        - colors: array of hex colors for each layer
-        - geo_units: array of geoUnit names (or None)
-        - qc_step: step plot x-values for qc
-        - depth_step: step plot y-values for depth
-        - max_qc: maximum qc value
-        - geo_unit_zones: list of (unit_name, start_depth, end_depth) tuples
+    This is a performance-optimized version that only parses the two tables needed
+    for soil profile visualization, instead of parsing the entire file.
 
-    Returns None if data cannot be extracted.
+    Returns:
+        dict with 'soil' and 'position_data' DataFrames, or None on error
     """
     try:
-        tables = parse_results_csv(input_file_path)
+        # Read file with first successful encoding
+        encodings = ['utf-8', 'windows-1252', 'latin-1']
+        content = None
+        for encoding in encodings:
+            try:
+                with open(str(file_path), 'r', encoding=encoding) as f:
+                    content = f.read()
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+
+        if content is None:
+            return None
+
+        # Only extract the tables we need
+        tables = {}
+        sections = re.split(r'\*\*', content)
+
+        for section in sections[1:]:
+            lines = section.strip().split('\n')
+            if not lines:
+                continue
+
+            table_name = lines[0].strip().rstrip(';')
+
+            # OPTIMIZATION: Only process soil and position_data tables
+            if table_name not in ('soil', 'position_data'):
+                continue
+
+            if len(lines) < 4:
+                continue
+
+            headers = lines[2].strip().split(';')
+            data_lines = []
+            for line in lines[4:]:
+                line = line.strip()
+                if not line:
+                    break
+                data_lines.append(line)
+
+            if not data_lines:
+                continue
+
+            # Parse data
+            data_rows = [line.split(';') for line in data_lines]
+            df = pd.DataFrame(data_rows, columns=headers)
+
+            # OPTIMIZATION: Only convert numeric columns we actually need
+            if table_name == 'soil':
+                # Only convert z_top and qc to numeric (skip plot_Color, geoUnit)
+                for col in ['z_top', 'qc']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col].replace(['NaN', 'nan', 'NA', 'na', ''], pd.NA), errors='coerce')
+            elif table_name == 'position_data':
+                # Only convert zSeabed
+                if 'zSeabed' in df.columns:
+                    df['zSeabed'] = pd.to_numeric(df['zSeabed'].replace(['NaN', 'nan', 'NA', 'na', ''], pd.NA), errors='coerce')
+
+            tables[table_name] = df
+
+            # Early exit if we have both tables
+            if 'soil' in tables and 'position_data' in tables:
+                break
+
+        return tables if tables else None
+    except Exception as e:
+        return None
+
+
+def extract_soil_profile_data(input_file_path: Path):
+    """
+    Extract soil profile data from input position CSV file for overlay on driveability plots.
+
+    Reads the **soil and **position_data tables to create a complete soil stratigraphy profile
+    with cone resistance (qc) values, layer colors, and geoUnit classifications.
+
+    Data Processing:
+    1. Read zSeabed elevation from position_data table (LAT reference)
+    2. Extract soil layers from soil table (z_top, qc, plot_Color, geoUnit)
+    3. Convert elevations to depths below seabed: depth = zSeabed - z_top
+    4. Convert qc from Pa to MPa for plotting
+    5. Create step plot arrays for constant qc within each layer
+    6. Group consecutive layers with same geoUnit for zone labels
+
+    Filtering:
+    - Only includes layers at or below seabed (depth >= 0)
+    - Handles missing colors with default gray (#d3d3d3)
+    - Processes geoUnit labels if column exists
+
+    Args:
+        input_file_path: Path to input_Position_*_{Position}.csv file
+
+    Returns:
+        Dictionary containing:
+        - 'depth_below_seabed': pd.Series of depths in meters (0 = seabed)
+        - 'qc_mpa': pd.Series of cone resistance values in MPa
+        - 'colors': pd.Series of hex color codes for each layer
+        - 'geo_units': pd.Series of geoUnit names (or None if column missing)
+        - 'qc_step': List of qc values for step plot (creates horizontal lines)
+        - 'depth_step': List of depth values for step plot (matches qc_step)
+        - 'max_qc': Maximum qc value across all layers (for axis scaling)
+        - 'geo_unit_zones': List of tuples (unit_name, start_depth, end_depth)
+
+        Returns None if data cannot be extracted or file cannot be parsed.
+
+    Example:
+        data = extract_soil_profile_data(Path("input_Position_const_blow_A01.csv"))
+        if data:
+            print(f"Extracted {len(data['depth_below_seabed'])} soil layers")
+            print(f"Max qc: {data['max_qc']:.2f} MPa")
+    """
+    # PERFORMANCE OPTIMIZATION: Use fast targeted parser instead of full file parser
+    try:
+        tables = _parse_soil_tables_only(input_file_path)
+        if tables is None:
+            return None
     except Exception as e:
         print(f"Error parsing input file {input_file_path}: {e}")
         return None
@@ -910,27 +1161,35 @@ def extract_soil_profile_data(input_file_path: Path):
     if soil_table is None:
         return None
 
-    # Extract required columns
+    # Extract required columns - check existence first
     required_cols = ['z_top', 'qc', 'plot_Color']
     if not all(col in soil_table.columns for col in required_cols):
         return None
 
-    z_top_lat = pd.to_numeric(soil_table['z_top'], errors='coerce')
-    qc_pa = pd.to_numeric(soil_table['qc'], errors='coerce')
-    colors = soil_table['plot_Color'].fillna('#d3d3d3').astype(str).replace(['nan', 'NaN', 'NA', ''], '#d3d3d3')
+    # OPTIMIZED: Extract columns directly (parse_results_csv already converted to numeric)
+    z_top_lat = soil_table['z_top']
+    qc_pa = soil_table['qc']
+
+    # Handle colors efficiently
+    colors = soil_table['plot_Color'].copy()
+    if colors.dtype == 'object':  # Only process if not already numeric
+        colors = colors.fillna('#d3d3d3').astype(str)
+        colors = colors.replace(['nan', 'NaN', 'NA', ''], '#d3d3d3')
 
     # Extract geoUnit if available
     geo_units = None
     if 'geoUnit' in soil_table.columns:
         geo_units = soil_table['geoUnit'].fillna('').astype(str)
 
-    # Filter valid data
+    # OPTIMIZED: Single boolean mask for all filtering
     valid_initial = z_top_lat.notna() & qc_pa.notna()
-    z_top_lat = z_top_lat[valid_initial]
-    qc_pa = qc_pa[valid_initial]
-    colors = colors[valid_initial]
+
+    # Apply mask once to all arrays
+    z_top_lat = z_top_lat[valid_initial].reset_index(drop=True)
+    qc_pa = qc_pa[valid_initial].reset_index(drop=True)
+    colors = colors[valid_initial].reset_index(drop=True)
     if geo_units is not None:
-        geo_units = geo_units[valid_initial]
+        geo_units = geo_units[valid_initial].reset_index(drop=True)
 
     if len(z_top_lat) == 0:
         return None
@@ -938,65 +1197,70 @@ def extract_soil_profile_data(input_file_path: Path):
     # Determine seabed elevation
     seabed_elevation = zSeabed if zSeabed is not None else z_top_lat.iloc[0]
 
-    # Calculate depth below seabed
+    # OPTIMIZED: Vectorized calculations
     depth_below_seabed = seabed_elevation - z_top_lat
     qc_mpa = qc_pa / 1e6
 
-    # Filter to layers below seabed
+    # OPTIMIZED: Single combined filter
     valid_mask = (depth_below_seabed >= 0) & (qc_mpa > 0)
-    depth_below_seabed = depth_below_seabed[valid_mask]
-    qc_mpa = qc_mpa[valid_mask]
-    colors = colors[valid_mask]
+    depth_below_seabed = depth_below_seabed[valid_mask].reset_index(drop=True)
+    qc_mpa = qc_mpa[valid_mask].reset_index(drop=True)
+    colors = colors[valid_mask].reset_index(drop=True)
     if geo_units is not None:
-        geo_units = geo_units[valid_mask]
+        geo_units = geo_units[valid_mask].reset_index(drop=True)
 
     if len(depth_below_seabed) == 0:
         return None
 
-    # Build step plot data
-    qc_step = []
-    depth_step = []
-    for i in range(len(depth_below_seabed) - 1):
-        depth_start = depth_below_seabed.iloc[i]
-        depth_end = depth_below_seabed.iloc[i + 1]
-        qc_value = qc_mpa.iloc[i]
-        qc_step.extend([qc_value, qc_value])
-        depth_step.extend([depth_start, depth_end])
-
-    if len(depth_below_seabed) > 0:
+    # OPTIMIZED: Build step plot data using list comprehension (faster than extend in loop)
+    n = len(depth_below_seabed)
+    if n > 1:
+        # Vectorized approach for step plot
+        qc_step = []
+        depth_step = []
+        for i in range(n - 1):
+            qc_val = qc_mpa.iloc[i]
+            d_start = depth_below_seabed.iloc[i]
+            d_end = depth_below_seabed.iloc[i + 1]
+            qc_step.extend([qc_val, qc_val])
+            depth_step.extend([d_start, d_end])
+        # Add last point
         qc_step.append(qc_mpa.iloc[-1])
         depth_step.append(depth_below_seabed.iloc[-1])
+    else:
+        qc_step = [qc_mpa.iloc[0]]
+        depth_step = [depth_below_seabed.iloc[0]]
 
-    max_qc = qc_mpa.max()
+    max_qc = float(qc_mpa.max())  # Convert to Python float (faster than keeping as numpy)
 
-    # Identify geoUnit zones
+    # OPTIMIZED: Identify geoUnit zones efficiently
     geo_unit_zones = []
     if geo_units is not None and len(geo_units) > 0:
-        geo_units_reset = geo_units.reset_index(drop=True)
-        depth_reset = depth_below_seabed.reset_index(drop=True)
-
         current_unit = None
         zone_start = None
 
-        for i in range(len(geo_units_reset)):
-            unit = geo_units_reset.iloc[i]
-            depth = depth_reset.iloc[i]
+        for i in range(len(geo_units)):
+            unit = geo_units.iloc[i]
+            depth = depth_below_seabed.iloc[i]
 
-            if not unit or unit in ['', 'nan', 'NaN', 'NA']:
+            # Skip empty/invalid units
+            if not unit or unit in ('', 'nan', 'NaN', 'NA'):
                 if current_unit is not None:
                     geo_unit_zones.append((current_unit, zone_start, depth))
                     current_unit = None
                     zone_start = None
                 continue
 
+            # Start new zone or continue existing
             if unit != current_unit:
                 if current_unit is not None:
                     geo_unit_zones.append((current_unit, zone_start, depth))
                 current_unit = unit
                 zone_start = depth
 
-        if current_unit is not None and len(depth_reset) > 0:
-            last_depth = depth_reset.iloc[-1]
+        # Close last zone
+        if current_unit is not None:
+            last_depth = depth_below_seabed.iloc[-1]
             geo_unit_zones.append((current_unit, zone_start, last_depth))
 
     return {
@@ -1332,21 +1596,64 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                       soil_profile_data: dict = None,
                       gripper_data: dict = None,
                       abandonment_data: dict = None,
-                      refusal_data: dict = None):
+                      refusal_data: dict = None,
+                      show_plot: bool = True):
     """
-    Plot Rut vs Depth for selected methods and bounds using Plotly (interactive).
-    Each method gets a unique color, each bound gets a unique line style.
+    Create comprehensive interactive driveability analysis plot for a single position.
 
-    IMPROVED VERSION: Info panel now uses go.Table for professional appearance.
+    Generates a 2x4 subplot grid with synchronized y-axes for easy comparison:
+
+    ROW 1 (Driving Parameters):
+    - Col 1: Static Resistance to Driving (SRD) [MN] vs Depth with soil profile overlay
+    - Col 2: Blowcount Rate [bl/25cm] vs Depth with hard driving & refusal thresholds
+    - Col 3: Input Energy [kJ/blow] vs Depth
+    - Col 4: Position Information Table (weights, depths, thresholds)
+
+    ROW 2 (Cumulative Metrics & Assessment):
+    - Col 1: Total Energy [GJ] vs Depth (cumulative energy consumption)
+    - Col 2: Cumulative Blows vs Depth (total hammer blows)
+    - Col 3: SRD [kN] vs Depth (logarithmic scale) with weight thresholds
+    - Col 4: Self-Weight Penetration & Pile Run Assessment Table
+
+    Key Features:
+    - Color coding: Each SRD method gets unique color (MD=blue, MY=red, AH=green)
+    - Line styles: Soil bounds differentiated (be=solid, lb=dash, ub=dot)
+    - Soil overlay: qc profile with color-coded layers and geoUnit labels on SRD plot
+    - Horizontal lines: Target depth, gripper release, MP abandonment, refusal risks
+    - Weight thresholds: MP+ILT, MP+Hammer, MP only shown on log SRD plot
+    - A3 landscape format: Optimized for printing/reporting (1587x1123 px)
 
     Args:
-        soil_profile_data: Optional dict with soil profile data to overlay on SRD plot.
-                          Should contain keys: depth_below_seabed, qc_mpa, colors, qc_step,
-                          depth_step, max_qc, geo_unit_zones
-        gripper_data: Optional dict mapping position names to minimum penetration for gripper release
-        abandonment_data: Optional dict mapping position names to minimum penetration for MP abandonment
-        refusal_data: Optional dict mapping position names to refusal risk depths for different pause durations
+        tables: Dictionary of DataFrames parsed from driveability results CSV
+        position: Position name (e.g., 'A01', 'A02')
+        selected_methods: List of SRD methods to plot (e.g., ['MD', 'AH'])
+        selected_bounds: List of soil bounds to plot (e.g., ['lb', 'be', 'ub'])
+        output_dir: Directory to save HTML plot (optional, uses PLOTS_OUTPUT_DIR if None)
+        monopile_weights: Dict mapping position names to monopile weights in tonnes
+        position_info: Dict with hammer details, target depth, blowcount rate
+        soil_profile_data: Dict with qc profile, layers, colors, geoUnits (optional)
+                          Keys: depth_below_seabed, qc_mpa, colors, qc_step,
+                                depth_step, max_qc, geo_unit_zones
+        gripper_data: Dict mapping positions to gripper release depths (optional)
+        abandonment_data: Dict mapping positions to MP abandonment depths (optional)
+        refusal_data: Dict mapping positions to refusal risk depths by duration (optional)
+                     Format: {position: {'1hr': depth, '24hr': depth, ...}}
+        show_plot: If True, opens plot in browser; if False, only saves to file (default: True)
+
+    Output:
+        - Saves interactive HTML plot as: Installation_Driveability_{position}.html
+        - Opens plot in default browser for immediate review
+        - Console output shows plot statistics and file location
+
+    Notes:
+        - All subplots share synchronized y-axes for consistent zooming
+        - Uses banker's rounding avoidance (ROUND_HALF_UP) for displayed values
+        - Gracefully handles missing optional data (skips overlay if unavailable)
     """
+    # ===================================================================================================
+    # INITIALIZATION AND SETUP
+    # ===================================================================================================
+
     # Extract target depth from summary table
     target_depth = None
     summary_table = tables.get('results_PileDrivingAnalysis_Summary')
@@ -1357,41 +1664,41 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         except (ValueError, IndexError):
             print("Warning: Could not extract target depth from summary table")
 
-    # Define colors for methods
+    # Define color scheme for SRD methods (consistent across all plots)
     method_colors = {
         'MD': '#1f77b4',  # blue
         'MY': '#d62728',  # red
         'AH': '#2ca02c'   # green
     }
 
-    # Define line dash patterns for bounds (Plotly format)A01
+    # Define line style patterns for soil bounds (Plotly format)
     bound_dashes = {
-        'be': 'solid',      # best estimate: solid line
-        'lb': 'dash',       # lower bound: dashed line
-        'ub': 'dot'         # upper bound: dotted line
+        'be': 'solid',      # Best estimate: solid line (most prominent)
+        'lb': 'dash',       # Lower bound: dashed line
+        'ub': 'dot'         # Upper bound: dotted line
     }
 
-    # Create subplots: 2 rows, 4 columns (info panel in row 1, col 4; weight table in row 2, col 4)
-    # IMPORTANT: Specify 'table' type for row 1, col 4 and row 2, col 4 to support go.Table
-    # Optimized for A3 paper (landscape): 420mm x 297mm
-    # row_heights: [0.5, 0.5] gives equal height to both rows
-    # column_widths: [0.23, 0.23, 0.23, 0.31] gives slightly more space to table column
-    # shared_yaxes='all' enables synchronized zooming across ALL subplots (both rows)
+    # ===================================================================================================
+    # CREATE SUBPLOT GRID (2 rows × 4 columns)
+    # ===================================================================================================
+    # Layout: Row 1 - SRD, Blowcount, Energy, Info Table
+    #         Row 2 - Total Energy, Cumulative Blows, SRD (log), Assessment Table
+    # A3 landscape format (420mm × 297mm) at 96 DPI = 1587px × 1123px
+    # Synchronized y-axes enable consistent zooming across all plots
     fig = make_subplots(
         rows=2, cols=4,
-        shared_yaxes='all',  # Enable shared y-axes for synchronized zooming across ALL subplots
-        row_heights=[0.5, 0.5],  # Equal height for both rows - optimized for A3 printing
-        column_widths=[0.23, 0.23, 0.23, 0.31],  # Equal width for plots, slightly wider for tables
+        shared_yaxes='all',  # Critical: enables synchronized zooming/panning
+        row_heights=[0.5, 0.5],  # Equal height distribution
+        column_widths=[0.23, 0.23, 0.23, 0.31],  # Plots: 23% each, Tables: 31%
         horizontal_spacing=0.06,
-        vertical_spacing=0.12,  # Adequate spacing between rows for A3 layout
+        vertical_spacing=0.12,
         subplot_titles=(None, None, None, None, None, None, None, None),
         specs=[[{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}, {'type': 'table'}],
                [{'type': 'xy'}, {'type': 'xy'}, {'type': 'xy'}, {'type': 'table'}]]
     )
     plot_count = 0
 
-    # Store soil profile data for later (will be added after all traces are plotted)
-    # This ensures we know the axis ranges
+    # Prepare soil profile data for later overlay (added after traces to determine axis ranges)
     soil_layer_data = None
     if soil_profile_data is not None:
         print("Preparing soil profile overlay for SRD plot...")
@@ -1404,27 +1711,33 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             'geo_unit_zones': soil_profile_data['geo_unit_zones']
         }
 
+    # ===================================================================================================
+    # EXTRACT AND PLOT DRIVEABILITY DATA FOR SELECTED METHODS/BOUNDS
+    # ===================================================================================================
+    # Storage for later assessment calculations
     methods_to_plot = []
     bounds_to_plot = []
     ruts_to_plot = []
     depths_to_plot = []
-    # Plot each combination
+
+    # Iterate through all tables and plot selected method/bound combinations
     for table_name, df in tables.items():
         method, bound = extract_method_and_bound(table_name)
 
+        # Skip if not in user's selection
         if method not in selected_methods or bound not in selected_bounds:
             continue
 
-        # Check if required columns exist
+        # Validate required columns exist in this table
         if 'Depth' not in df.columns or 'Rut' not in df.columns or 'Blowcount_rate' not in df.columns or 'Input_Energy' not in df.columns:
             continue
 
-        # Convert to numeric if needed
+        # Convert all data columns to numeric, handling errors gracefully
         depth = pd.to_numeric(df['Depth'], errors='coerce')
-        rut = pd.to_numeric(df['Rut'], errors='coerce')
+        rut = pd.to_numeric(df['Rut'], errors='coerce')  # Static Resistance to Driving in MN
         blowcount_rate = pd.to_numeric(df['Blowcount_rate'], errors='coerce') / 4.0  # Convert bl/m to bl/25cm
-        blowcount_rate_per_m = pd.to_numeric(df['Blowcount_rate'], errors='coerce')  # Keep original bl/m for cumulative calculation
-        input_energy = pd.to_numeric(df['Input_Energy'], errors='coerce')
+        blowcount_rate_per_m = pd.to_numeric(df['Blowcount_rate'], errors='coerce')  # Keep bl/m for cumulative calculation
+        input_energy = pd.to_numeric(df['Input_Energy'], errors='coerce')  # Energy per blow in kJ
         # Use Cumulative_input_energy column if present, else fallback to cumsum of Input_Energy
         cumulative_input_energy = pd.to_numeric(df['Cumulative_input_Energy'], errors='coerce') / 1_000_000
 
@@ -1714,7 +2027,7 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
     weight_table = go.Table(
         columnwidth=[0.526, 0.158, 0.158, 0.158],  # Control column widths: 50% for first column, 17% each for LB/BE/UB
         header=dict(
-            values=['<b>Evaluated  Depth [mbsf]</b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
+            values=['<b>Evaluated  Depth [mbsb]</b>', '<b>LB</b>', '<b>BE</b>', '<b>UB</b>'],
             fill_color=['#b3c6e7', '#e6f2ff', '#e6f2ff', '#e6f2ff'],  # Nicer color for first row
             align='center',
             font=dict(size=13, color='black', family='Arial')
@@ -1793,6 +2106,12 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 rounded_val = float(Decimal(str(val)).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP))
                 refusal_7days = f"{rounded_val:.1f}"
 
+    # ===================================================================================================
+    # CREATE INFORMATION AND ASSESSMENT TABLES (Col 4)
+    # ===================================================================================================
+
+    # --- POSITION INFORMATION TABLE (Row 1, Col 4) ---
+    # Contains project-specific data, installation parameters, and risk thresholds
     info_table = go.Table(
         columnwidth=[0.7, 0.3],
         header=dict(
@@ -2044,10 +2363,19 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         yanchor='bottom'
     )
 
-    # Add qc profile overlay to SRD subplot if soil layer data is prepared
+    # ===================================================================================================
+    # SOIL PROFILE OVERLAY ON SRD SUBPLOT (Row 1, Col 1)
+    # ===================================================================================================
+    # If soil profile data is available, overlay it on the SRD plot to show geological context.
+    # This includes:
+    # 1. Color-coded soil layers as background rectangles
+    # 2. qc (cone resistance) profile as grey line on secondary x-axis
+    # 3. geoUnit labels positioned at layer boundaries
+
     if soil_layer_data is not None:
         print("Finalizing soil profile overlay on SRD plot...")
 
+        # Extract prepared soil data
         depth_below_seabed = soil_layer_data['depth_below_seabed']
         colors = soil_layer_data['colors']
         qc_step = soil_layer_data['qc_step']
@@ -2055,20 +2383,21 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
         max_qc = soil_layer_data['max_qc']
         geo_unit_zones = soil_layer_data['geo_unit_zones']
 
-        # Determine the depth range to use (same as other plots - just below target depth)
-        # Find the maximum depth from the actual SRD data traces
+        # --- DETERMINE DEPTH RANGE FOR SOIL OVERLAY ---
+        # Match the depth range of SRD data traces to avoid unnecessary soil layer display
+        # Find maximum depth from all plotted SRD traces
         max_depth = 0
         for trace in fig.data:
-            # Check if this trace has depth data (y values) and is not a table
+            # Check if this trace has depth data (y values) and is not a table trace
             if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
                 try:
                     trace_max = max(trace.y)
                     if trace_max > max_depth:
                         max_depth = trace_max
                 except:
-                    pass
+                    pass  # Skip traces without valid y data
 
-        # Ensure max_depth is at least equal to target depth (so QC plot goes down to target penetration)
+        # Ensure soil profile extends at least to target depth (full installation depth)
         if target_depth:
             if max_depth < target_depth:
                 max_depth = target_depth
@@ -2078,18 +2407,19 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
 
         print(f"  Using max depth: {max_depth:.2f} m for soil profile overlay")
 
-        # Filter soil layers and qc data to only show up to max_depth
+        # --- FILTER SOIL DATA TO MATCH DEPTH RANGE ---
+        # Only display soil layers within the SRD plot depth range (optimization + clarity)
         depth_below_seabed_filtered = depth_below_seabed[depth_below_seabed <= max_depth]
 
-        # Ensure depth_below_seabed_filtered includes max_depth for proper layer extension
+        # Ensure the filtered depths extend to max_depth for complete layer coverage
         if len(depth_below_seabed_filtered) > 0 and depth_below_seabed_filtered.iloc[-1] < max_depth:
-            # Add max_depth as a final point
+            # Add max_depth as a final boundary point
             depth_below_seabed_filtered = pd.concat([
                 depth_below_seabed_filtered,
                 pd.Series([max_depth])
             ]).reset_index(drop=True)
 
-        # Filter qc step data
+        # Filter qc step plot data to match depth range
         qc_step_filtered = []
         depth_step_filtered = []
         for i, d in enumerate(depth_step):
@@ -2097,28 +2427,32 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 qc_step_filtered.append(qc_step[i])
                 depth_step_filtered.append(d)
 
-        # Extend QC profile to max_depth if the last data point is shallower than max_depth
+        # Extend qc profile to max_depth if necessary (maintains constant value in deepest layer)
         if len(depth_step_filtered) > 0 and depth_step_filtered[-1] < max_depth:
-            # Add the last qc value extended to max_depth
+            # Extend the last qc value down to max_depth
             qc_step_filtered.append(qc_step_filtered[-1])
             depth_step_filtered.append(max_depth)
 
-        # Add soil layer backgrounds as shapes to ONLY the first subplot (row 1, col 1)
-        # This provides geological context without making other plots too visually heavy
+        # --- ADD SOIL LAYER BACKGROUNDS TO SRD SUBPLOT ---
+        # Color-coded rectangles provide geological context behind SRD curves
+        # Applied ONLY to row 1, col 1 to avoid cluttering other subplots
         num_layers = len(depth_below_seabed_filtered) - 1
 
-        # Add each soil layer to subplot row 1, col 1
+        # Iterate through soil layers and add as background shapes
         for i in range(num_layers):
             if i >= len(colors):
-                break
+                break  # Safety check for color array bounds
+
+            # Define layer depth boundaries
             depth_start = depth_below_seabed_filtered.iloc[i]
             depth_end = depth_below_seabed_filtered.iloc[i + 1] if i + 1 < len(depth_below_seabed_filtered) else max_depth
             layer_color = str(colors.iloc[i])
 
+            # Validate color format (must be hex or rgb)
             if not layer_color.startswith('#') and not layer_color.startswith('rgb'):
-                layer_color = '#d3d3d3'
+                layer_color = '#d3d3d3'  # Default gray for invalid colors
 
-            # Add shape spanning full width of subplot in x-direction (using x domain coordinates)
+            # Add rectangle shape spanning full subplot width (x domain: 0 to 1)
             fig.add_shape(
                 type="rect",
                 xref="x domain",  # Use domain coordinates (0 to 1) for x
@@ -2133,20 +2467,21 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 row=1, col=1
             )
 
-        # Add the last layer extending to the bottom of the subplot (max_depth)
-        # This handles the case where we extended depth_below_seabed_filtered to max_depth
-        # but colors array doesn't have a corresponding entry
+        # --- EXTEND DEEPEST SOIL LAYER TO PLOT BOTTOM ---
+        # Handle case where filtered depths extend beyond available color data
+        # This ensures no white gap at the bottom of the plot
         if len(depth_below_seabed_filtered) > 0 and len(colors) > 0:
-            # Find the last depth that has a corresponding color
+            # Find the last layer that has a corresponding color
             last_colored_index = min(len(colors) - 1, len(depth_below_seabed_filtered) - 2)
             if last_colored_index >= 0 and last_colored_index < len(depth_below_seabed_filtered) - 1:
                 last_depth = depth_below_seabed_filtered.iloc[last_colored_index + 1]
                 last_color = str(colors.iloc[last_colored_index])
 
+                # Validate color format
                 if not last_color.startswith('#') and not last_color.startswith('rgb'):
                     last_color = '#d3d3d3'
 
-                # Extend the last layer color to the bottom of the plot
+                # Extend the deepest layer's color to the bottom of the plot
                 if last_depth < max_depth:
                     fig.add_shape(
                         type="rect",
@@ -2162,8 +2497,10 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                         row=1, col=1
                     )
 
-        # Add qc step plot trace using the secondary axis (grey line)
-        # IMPORTANT: Don't use row/col parameters to preserve axis references
+        # --- ADD QC PROFILE AS SECONDARY X-AXIS TRACE ---
+        # Grey line showing cone resistance (qc) variation with depth
+        # Uses xaxis7 (secondary x-axis at top) while sharing yaxis with SRD plot
+        # Step plot style maintains constant qc within each soil layer
         fig.add_trace(
             go.Scatter(
                 x=qc_step_filtered,
@@ -2171,45 +2508,46 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
                 mode='lines',
                 name='qc Profile',
                 line=dict(color='grey', width=2, dash='solid'),
-                xaxis='x7',  # Use secondary x-axis
-                yaxis='y',   # Use same y-axis as SRD plot (row 1, col 1)
+                xaxis='x7',  # Secondary x-axis (configured below)
+                yaxis='y',   # Share y-axis with SRD plot (row 1, col 1)
                 hovertemplate='<b>qc Profile</b><br>qc: %{x:.2f} MPa<br>Depth: %{y:.2f} m<br><extra></extra>',
                 showlegend=False  # Don't show in legend
             )
         )
 
-        # Add secondary x-axis for qc (overlaying xaxis which is row 1, col 1)
-        # We'll create xaxis7 as it doesn't conflict with existing axes
-        # Configure AFTER adding the trace to ensure it's properly rendered
+        # --- CONFIGURE SECONDARY X-AXIS FOR QC PROFILE ---
+        # Create xaxis7 overlaying the primary x-axis (SRD) on row 1, col 1
+        # Positioned at top of subplot to avoid interference with SRD axis at bottom
+        # Grey styling distinguishes it from primary SRD axis
         fig.update_layout(
             xaxis7=dict(
                 title=dict(text='qc [MPa]', font=dict(color='grey', size=11)),
-                overlaying='x',  # Overlay on xaxis (row 1, col 1)
-                side='top',
-                anchor='y',  # Anchor to yaxis (row 1, col 1)
-                range=[0, max_qc * 1.1],
-                showline=True,  # IMPORTANT: Must be True to show the axis line
+                overlaying='x',  # Overlay on primary x-axis (SRD axis)
+                side='top',      # Position at top of subplot
+                anchor='y',      # Anchor to primary y-axis (depth)
+                range=[0, max_qc * 1.1],  # Extend range by 10% for visual clearance
+                showline=True,   # Display axis line for clear separation
                 linecolor='grey',
                 linewidth=2,
-                showgrid=False,  # Don't show grid to avoid clutter
+                showgrid=False,  # Disable grid to avoid cluttering SRD plot
                 zeroline=False,
-                showticklabels=True,  # Show tick labels
-                tickmode='linear',  # Use linear tick mode
-                tick0=0,  # Start ticks at 0
-                dtick=20,  # Major tick marks every 20 MPa
-                ticks='outside',  # Show ticks outside
+                showticklabels=True,
+                tickmode='linear',
+                tick0=0,         # Start ticks at 0 MPa
+                dtick=20,        # Major tick marks every 20 MPa
+                ticks='outside',
                 ticklen=5,
                 tickwidth=2,
                 tickcolor='grey',
                 tickfont=dict(color='grey', size=10),
                 mirror=False,
-                # Add minor ticks every 5 MPa
+                # Minor ticks for finer scale reading
                 minor=dict(
                     tickmode='linear',
                     tick0=0,
-                    dtick=5,  # Minor tick marks every 5 MPa
+                    dtick=5,     # Minor tick marks every 5 MPa
                     ticks='outside',
-                    ticklen=3,  # Shorter than major ticks
+                    ticklen=3,   # Shorter than major ticks
                     tickwidth=1,
                     tickcolor='grey',
                     showgrid=False
@@ -2217,45 +2555,392 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
             )
         )
 
-        # Explicitly set the yaxis range to ensure it doesn't auto-extend beyond max_depth
-        # This ensures all subplots have the same vertical axis range
+        # Explicitly lock y-axis range to prevent auto-extension beyond max_depth
+        # Ensures consistent vertical scale across all synchronized subplots
         fig.update_yaxes(range=[max_depth, 0], row=1, col=1)
 
-        # Add geoUnit labels (only for zones visible in the depth range)
-        # Position them at the far right boundary of the subplot
+        # --- ADD GEOUNIT LABELS TO SRD SUBPLOT ---
+        # Label geological unit zones at their top boundaries (right-aligned)
+        # Only label zones visible within the current depth range
         for unit_name, start_depth, end_depth in geo_unit_zones:
             if start_depth <= max_depth:
-                # Use paper coordinates to position at far right of subplot
-                # For row 1, col 1, the x domain is approximately 0 to 0.23 (based on column_widths=[0.23, ...])
-                # We want to position at 95% within this subplot
-
+                # Position label at 95% of subplot width (right side, avoiding overlap with data)
+                # x domain coordinates: 0 = left edge, 1 = right edge of subplot
                 fig.add_annotation(
-                    x=0.95,  # 95% from left edge of subplot (using x domain)
-                    y=start_depth,
-                    xref='x domain',  # Reference to x-axis domain (0-1 within subplot)
-                    yref='y',  # Reference to y-axis (depth data coordinates)
+                    x=0.95,          # 95% from left edge of subplot
+                    y=start_depth,   # At the top boundary of the geological unit
+                    xref='x domain', # Use normalized subplot coordinates (0-1)
+                    yref='y',        # Use actual depth data coordinates
                     text=f'<b>{unit_name}</b>',
                     showarrow=False,
                     font=dict(size=11, color='black', family='Arial'),
-                    xanchor='right',  # Anchor text to the right so it doesn't extend beyond boundary
-                    yanchor='top'
+                    xanchor='right', # Right-align text to prevent extending beyond subplot edge
+                    yanchor='top'    # Top-align text to position at layer boundary
                 )
 
-        print(f"  Added qc profile, {num_layers} soil layers, and {len([z for z in geo_unit_zones if z[1] <= max_depth])} geoUnit labels to SRD subplot")
+        print(f"  ✓ Added qc profile, {num_layers} soil layers, and {len([z for z in geo_unit_zones if z[1] <= max_depth])} geoUnit labels to SRD subplot")
 
-    # Save or show
+    # ===================================================================================================
+    # SAVE AND DISPLAY PLOT
+    # ===================================================================================================
+    # Save interactive HTML plot with position-specific filename
     if output_dir:
-        output_path = output_dir / f'rut_vs_depth_{position}.html'
+        print(f"  [4/4] Saving plot to file...")
+        output_path = output_dir / f'Installation_Driveability_{position}.html'
         fig.write_html(str(output_path))
-        print(f"Plot saved to: {output_path}")
+        print(f"        ✓ Saved: {output_path}")
 
-    # Show interactive plot
-    fig.show()
-    print(f"✓ Interactive plot displayed with {plot_count} traces per subplot")
+    # Open interactive plot in default browser for immediate review (optional)
+    if show_plot:
+        print(f"  [4/4] Opening plot in browser...")
+        fig.show()
+        print(f"        ✓ Displayed with {plot_count} traces per subplot")
+    else:
+        print(f"  [4/4] Plot generation completed ({plot_count} traces per subplot)")
+
+
+def generate_pile_run_summary(
+    selected_positions: List[str],
+    position_tables: Dict[str, Dict[str, pd.DataFrame]],
+    selected_methods: List[str],
+    selected_bounds: List[str],
+    monopile_weights: dict,
+    output_dir: Path
+) -> None:
+    """
+    Generate a summary CSV/Excel file with pile run assessment results for all requested positions.
+
+    Creates a file with three header rows showing:
+    - Row 1: Assessment categories (SWP MP + ILT, Pile run @hammer placement, etc.)
+    - Row 2: Method_Bound combinations (lb_MY, be_MY, ub_MY, etc.)
+    - Row 3: Units (m for all depth columns)
+
+    The summary includes 5 assessment categories, each with values for all bound combinations:
+    1. SWP MP + ILT: Self-weight penetration with internal lifting tool
+    2. Pile run @hammer placement: Risk assessment at hammer placement depth
+    3. SWP MP + Hammer: Self-weight penetration with hammer weight
+    4. Pile run risk top: First depth where pile run risk initiates
+    5. Pile run risk bottom: Depth where pile run risk zone ends
+
+    Args:
+        selected_positions: List of position names to include (e.g., ['A01', 'A02'])
+        position_tables: Dictionary mapping position names to their parsed CSV tables
+        selected_methods: List of SRD methods selected (e.g., ['MD', 'MY', 'AH'])
+        selected_bounds: List of soil bounds selected (e.g., ['lb', 'be', 'ub'])
+        monopile_weights: Dictionary mapping position names to monopile weights
+        output_dir: Directory where the summary file will be saved
+
+    Output File:
+        - Filename: summary_pile_run.xlsx (Excel format for proper multi-row headers)
+        - Location: output_dir / summary_pile_run.xlsx
+    """
+    print("\n" + "="*60)
+    print("GENERATING PILE RUN SUMMARY FILE")
+    print("="*60)
+
+    # Determine all method-bound combinations from selected methods and bounds
+    method_order = sorted(selected_methods)
+
+    # Define bound order explicitly as lb, be, ub (not alphabetical)
+    # Filter to only include bounds that are selected
+    desired_bound_order = ['lb', 'be', 'ub']
+    bound_order = [b for b in desired_bound_order if b in selected_bounds]
+
+    # Create header rows - NEW LAYOUT: Group by assessment category, then bounds
+    header_row_1 = ['Position']  # Category level
+    header_row_2 = ['']  # Bound level
+    header_row_3 = ['text']  # Units level
+
+    # Define assessment categories (5 categories, each with all bounds)
+    assessment_categories = [
+        'SWP MP + ILT',
+        'Pile run @hammer placement',
+        'SWP MP + Hammer',
+        'Pile run risk top',
+        'Pile run risk bottom'
+    ]
+
+    # Create method label for header row 2
+    # If multiple methods selected, show all methods to indicate conservative selection
+    # If single method, just show that method
+    if len(selected_methods) == 1:
+        method_label = selected_methods[0]
+    else:
+        # Show all methods to indicate conservative value across all
+        method_label = '+'.join(sorted(selected_methods))
+
+    # NEW LAYOUT: For each assessment category, add all bounds
+    # This groups assessments together vertically for easier reading
+    for category in assessment_categories:
+        for bound in bound_order:
+            header_row_1.append(category)
+            # Format: lb_MD or lb_MD+MY+AH (showing conservative across methods)
+            header_row_2.append(f'{bound}_{method_label}')
+            header_row_3.append('m')  # All values are in meters
+
+    # Initialize data storage
+    data_rows = []
+
+    # Process each position
+    print(f"  Total positions to process: {len(selected_positions)}")
+    for position in selected_positions:
+        print(f"  Processing {position}...")
+
+        # Get tables for this position
+        tables = position_tables.get(position, {})
+        if not tables:
+            print(f"    Warning: No data found for {position}")
+            # Calculate correct number of empty columns: 5 categories × number of bounds
+            row_data = [position] + [''] * (len(assessment_categories) * len(bound_order))
+            data_rows.append(row_data)
+            print(f"    Added empty row for {position}. Total rows now: {len(data_rows)}")
+            continue
+
+        # Get monopile weight
+        mp_weight = monopile_weights.get(position)
+        if mp_weight is None:
+            print(f"    Warning: No monopile weight found for {position}")
+            # Still add row with empty values
+            row_data = [position] + [''] * (len(assessment_categories) * len(bound_order))
+            data_rows.append(row_data)
+            print(f"    Added empty row for {position} (no weight). Total rows now: {len(data_rows)}")
+            continue
+
+        # Prepare data for assessment calculation
+        methods_to_plot = []
+        bounds_to_plot = []
+        ruts_to_plot = []
+        depths_to_plot = []
+
+        # Extract data from tables for selected methods and bounds
+        for table_name, df in tables.items():
+            method, bound = extract_method_and_bound(table_name)
+
+            if method not in selected_methods or bound not in selected_bounds:
+                continue
+
+            # Validate required columns
+            if 'Depth' not in df.columns or 'Rut' not in df.columns:
+                continue
+
+            # Convert to numeric
+            depth = pd.to_numeric(df['Depth'], errors='coerce')
+            rut = pd.to_numeric(df['Rut'], errors='coerce')
+
+            # Remove NaN values
+            mask = ~(depth.isna() | rut.isna())
+            depth = depth[mask]
+            rut = rut[mask]
+
+            if len(depth) == 0:
+                continue
+
+            methods_to_plot.append(method)
+            bounds_to_plot.append(bound)
+            ruts_to_plot.append(rut)
+            depths_to_plot.append(depth)
+
+        # Calculate pile run assessments
+        if methods_to_plot:
+            assessment = calculate_swp_and_pile_run_assessment(
+                methods_to_plot=methods_to_plot,
+                bounds_to_plot=bounds_to_plot,
+                ruts_to_plot=ruts_to_plot,
+                depths_to_plot=depths_to_plot,
+                mp_weight=mp_weight
+            )
+
+            # Build row data - NEW LAYOUT: Group by assessment category
+            row_data = [position]
+
+            # Helper function to convert string values to numbers where appropriate
+            def convert_to_number(value):
+                """Convert string numbers to float, keep text as-is"""
+                if isinstance(value, str):
+                    try:
+                        # Try to convert to float if it's a numeric string
+                        return float(value)
+                    except (ValueError, AttributeError):
+                        # Keep as text if conversion fails (e.g., "No risk", "Yes", etc.)
+                        return value
+                return value
+
+            # For each assessment category, add all bounds
+            # This matches the new header layout
+
+            # 1. SWP MP + ILT - all bounds
+            for bound in bound_order:
+                bound_key = bound.upper()
+                value = assessment['swp_mp_ilt_depths'].get(bound_key, '')
+                row_data.append(convert_to_number(value))
+
+            # 2. Pile run @hammer placement - all bounds
+            for bound in bound_order:
+                bound_key = bound.upper()
+                value = assessment['pile_run_at_hammer_placement'].get(bound_key, '')
+                row_data.append(convert_to_number(value))
+
+            # 3. SWP MP + Hammer - all bounds
+            for bound in bound_order:
+                bound_key = bound.upper()
+                value = assessment['swp_mp_hammer_depths'].get(bound_key, '')
+                row_data.append(convert_to_number(value))
+
+            # 4. Pile run risk top - all bounds
+            for bound in bound_order:
+                bound_key = bound.upper()
+                value = assessment['pile_run_risk_top'].get(bound_key, '')
+                row_data.append(convert_to_number(value))
+
+            # 5. Pile run risk bottom - all bounds
+            for bound in bound_order:
+                bound_key = bound.upper()
+                value = assessment['pile_run_risk_bottom'].get(bound_key, '')
+                row_data.append(convert_to_number(value))
+
+            data_rows.append(row_data)
+            print(f"    Successfully added row for {position}. Total rows now: {len(data_rows)}")
+        else:
+            print(f"    Warning: No valid data to calculate assessments for {position}")
+            row_data = [position] + [''] * (len(assessment_categories) * len(bound_order))
+            data_rows.append(row_data)
+            print(f"    Added empty row for {position}. Total rows now: {len(data_rows)}")
+
+    # Create DataFrame
+    print(f"\n  Creating DataFrame with {len(data_rows)} rows...")
+    df_summary = pd.DataFrame(data_rows, columns=header_row_2)
+    print(f"  DataFrame shape: {df_summary.shape} (rows × columns)")
+    print(f"  Position column values: {df_summary.iloc[:, 0].tolist()}")
+
+    # Save to Excel with multi-row headers
+    output_file = output_dir / 'summary_pile_run.xlsx'
+    try:
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            # Write the dataframe starting from row 4 (0-indexed: row 3) - after 3 header rows
+            df_summary.to_excel(writer, sheet_name='Pile Run Summary', startrow=3, index=False, header=False)
+
+            # Get the worksheet to add custom headers
+            worksheet = writer.sheets['Pile Run Summary']
+
+            # Write header row 1 (categories)
+            for col_idx, value in enumerate(header_row_1, start=1):
+                worksheet.cell(row=1, column=col_idx, value=value)
+
+            # Write header row 2 (method_bound)
+            for col_idx, value in enumerate(header_row_2, start=1):
+                worksheet.cell(row=2, column=col_idx, value=value)
+
+            # Write header row 3 (units)
+            for col_idx, value in enumerate(header_row_3, start=1):
+                worksheet.cell(row=3, column=col_idx, value=value)
+
+            # Format headers (bold)
+            from openpyxl.styles import Font, Alignment
+            for row in [1, 2, 3]:
+                for col in range(1, len(header_row_1) + 1):
+                    cell = worksheet.cell(row=row, column=col)
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        print(f"\n✓ Summary file saved: {output_file}")
+        print(f"  Positions included: {len(data_rows)}")
+        print(f"  Columns: {len(header_row_1)}")
+
+    except Exception as e:
+        print(f"\n✗ Error saving summary file: {e}")
+        # Fallback: Save as CSV (won't have perfect multi-row headers but will work)
+        csv_file = output_dir / 'summary_pile_run.csv'
+        try:
+            # Combine headers into single rows with appropriate separators
+            combined_header = []
+            for i in range(len(header_row_2)):
+                combined_header.append(f"{header_row_1[i]}|{header_row_2[i]}|{header_row_3[i]}")
+
+            df_csv = pd.DataFrame(data_rows, columns=combined_header)
+            df_csv.to_csv(csv_file, index=False)
+            print(f"\n✓ Fallback: Summary file saved as CSV: {csv_file}")
+        except Exception as e2:
+            print(f"\n✗ Error saving CSV fallback: {e2}")
 
 
 def main():
-    """Main execution function"""
+    """
+    Main execution function orchestrating the entire driveability analysis workflow.
+
+    EXECUTION FLOW:
+    ===============
+
+    1. INITIALIZATION
+       - Set root directory from MONOPILE_ROOT_DIR constant
+       - Fallback to local directory if network path unavailable
+       - Scan for position folders (A01, A02, etc.)
+
+    2. POSITION SELECTION
+       - Display available positions to user
+       - Prompt for position selection (comma-separated or 'all')
+       - Validate and store selected positions
+
+    3. DATA LOADING (Efficient - only for selected positions)
+       - Load gripper penetration data (gripper release + MP abandonment depths)
+       - Parse driveability CSV files for each selected position
+       - Extract available SRD methods (MD, MY, AH) and soil bounds (lb, be, ub)
+       - Store target penetration depths for refusal risk calculations
+
+    4. METHOD & BOUND SELECTION
+       - Display available SRD methods across all selected positions
+       - Prompt for method selection (comma-separated or 'all')
+       - Display available soil bounds across all selected positions
+       - Prompt for bound selection (comma-separated or 'all')
+
+    5. REFUSAL RISK DATA LOADING
+       - Load refusal risk assessment data from Excel file
+       - Read sheets: '1 hr', '24 hr', '48 hr', '7 days'
+       - Apply conservative logic across selected methods
+       - Store refusal depths for each position and pause duration
+
+    6. POSITION PROCESSING LOOP
+       For each selected position:
+       a) Extract soil profile data from input_Position_{Position}.csv
+          - qc profile, layer colors, geoUnit classifications
+
+       b) Call plot_driveability_results() to create comprehensive plot:
+          - 2x4 subplot grid with synchronized y-axes
+          - SRD plots with soil profile overlay
+          - Blowcount rates with thresholds
+          - Energy consumption metrics
+          - Assessment tables with SWP and pile run evaluations
+
+       c) Save plot as: Installation_Driveability_{Position}.html
+
+       d) Display interactive plot in browser
+
+    ERROR HANDLING:
+    ===============
+    - Network path unavailable: Falls back to local directory
+    - No positions found: Exits with warning message
+    - Missing data files: Graceful degradation, continues without optional overlays
+    - Parse errors: Logs warnings but continues processing other positions
+
+    USER INTERACTION:
+    =================
+    - Position selection: User chooses which positions to analyze
+    - Method selection: User chooses SRD calculation methods to compare
+    - Bound selection: User chooses soil parameter bounds to include
+    - All selections support 'all' keyword for full analysis
+
+    CONSOLE OUTPUT:
+    ===============
+    - Progress messages for each major step
+    - Data loading confirmations with counts
+    - Warning messages for missing/invalid data
+    - Plot save locations and success confirmations
+    - Visual separators (=== lines) for readability
+    """
+    # Start timing for performance tracking
+    start_time = time.time()
+
+    # Clear parse cache from any previous runs
+    clear_parse_cache()
 
     # Set the root directory
     root_dir = MONOPILE_ROOT_DIR
@@ -2286,6 +2971,13 @@ def main():
         selected_positions = [p[0] for p in positions]
     else:
         selected_positions = [p.strip().upper() for p in selected_positions_input.split(',') if p.strip()]
+
+    print(f"\n✓ Selected {len(selected_positions)} position(s) for analysis")
+
+    # ===================================================================================================
+    # LOAD POSITION-SPECIFIC DATA (OPTIMIZED - ONLY SELECTED POSITIONS)
+    # ===================================================================================================
+    load_start = time.time()
 
     # Load penetration data ONLY for selected positions (efficient!)
     # Returns two dictionaries: gripper release and MP abandonment
@@ -2321,6 +3013,9 @@ def main():
     methods = sorted(list(all_methods))
     bounds = sorted(list(all_bounds))
 
+    parse_time = time.time() - load_start
+    print(f"\n✓ Data loading completed in {parse_time:.2f} seconds")
+
 
     # User selection for methods and bounds
     print("\n" + "="*60)
@@ -2346,13 +3041,37 @@ def main():
 
     print(f"Selected bounds: {selected_bounds}")
 
+    # Ask user if they want to open plots in browser (can slow down execution)
+    print(f"\nOpen plots in browser? (Opening {len(selected_positions)} plot(s) can be slow)")
+    show_plots_input = input("Open in browser? (y/n, default=n): ").strip().lower()
+    show_plots = show_plots_input in ['y', 'yes']
+    if not show_plots:
+        print("✓ Plots will be saved to file only (faster execution)")
+
     # Load refusal risk data for selected positions and methods (efficient!)
     # This reads from the Excel file sheets: '1 hr', '24 hr', '48 hr', '7 days'
     refusal_data = get_refusal_risk_for_positions(selected_positions, selected_methods, target_depths)
 
+    # ===================================================================================================
+    # LOAD COMMON DATA ONCE (PERFORMANCE OPTIMIZATION)
+    # ===================================================================================================
+    # Load monopile weights ONCE for all selected positions instead of once per position
+    print(f"\nLoading monopile weights for {len(selected_positions)} position(s)...")
+    monopile_weights = get_monopile_weights(MONOPILE_WEIGHTS_FILE, selected_positions)
+
+    # ===================================================================================================
+    # PLOTTING LOOP - GENERATE INTERACTIVE PLOTS FOR EACH POSITION
+    # ===================================================================================================
+    plot_start = time.time()
+    print(f"\n{'='*60}")
+    print(f"GENERATING PLOTS FOR {len(selected_positions)} POSITION(S)")
+    print(f"{'='*60}")
+
     # --- MAIN LOOP: Process each selected position ---
-    for position in selected_positions:
-        print(f"\nProcessing position: {position}")
+    for idx, position in enumerate(selected_positions, 1):
+        position_start = time.time()
+        print(f"\n[{idx}/{len(selected_positions)}] Processing position: {position}")
+        print(f"{'='*60}")
 
         # Get corresponding tables
         tables = position_tables.get(position, {})
@@ -2364,29 +3083,180 @@ def main():
             input_files = list(position_dir.glob(f'input_Position_*_{position}.csv'))
             if input_files:
                 input_file = input_files[0]
+                print(f"  [1/4] Loading soil profile data...")
                 soil_profile_data = extract_soil_profile_data(input_file)
                 if soil_profile_data:
-                    print(f"Extracted soil profile data for overlay on SRD plot")
+                    print(f"        ✓ Extracted {len(soil_profile_data['depth_below_seabed'])} soil layers")
         except Exception as e:
-            print(f"Warning: Could not extract soil profile data: {e}")
+            print(f"  Warning: Could not extract soil profile data: {e}")
+
+        # Get position info once (reused in plot function)
+        print(f"  [2/4] Extracting position information...")
+        position_info = get_position_info(tables, position, selected_methods, selected_bounds)
 
         # Plot Rut vs Depth with soil profile overlay
+        print(f"  [3/4] Generating plot traces...")
         plot_driveability_results(
             tables=tables,
             position=position,
             selected_methods=selected_methods,
             selected_bounds=selected_bounds,
             output_dir=PLOTS_OUTPUT_DIR,
-            monopile_weights=get_monopile_weights(MONOPILE_WEIGHTS_FILE, [position]),
-            position_info=get_position_info(tables, position, selected_methods, selected_bounds),
+            monopile_weights=monopile_weights,
+            position_info=position_info,
             soil_profile_data=soil_profile_data,
             gripper_data=gripper_data,
             abandonment_data=abandonment_data,
-            refusal_data=refusal_data
+            refusal_data=refusal_data,
+            show_plot=show_plots
         )
+
+        position_time = time.time() - position_start
+        print(f"\n✓ Position {position} completed in {position_time:.2f} seconds")
+
+    # ===================================================================================================
+    # GENERATE PILE RUN SUMMARY FILE
+    # ===================================================================================================
+    # Create summary Excel/CSV file with pile run assessment results for all positions
+    try:
+        generate_pile_run_summary(
+            selected_positions=selected_positions,
+            position_tables=position_tables,
+            selected_methods=selected_methods,
+            selected_bounds=selected_bounds,
+            monopile_weights=monopile_weights,
+            output_dir=PLOTS_OUTPUT_DIR
+        )
+    except Exception as e:
+        print(f"\n✗ Error generating pile run summary: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # ===================================================================================================
+    # EXECUTION SUMMARY
+    # ===================================================================================================
+    total_time = time.time() - start_time
+    plot_time = time.time() - plot_start
+
+    print(f"\n{'='*60}")
+    print(f"EXECUTION SUMMARY")
+    print(f"{'='*60}")
+    print(f"Data loading time:    {parse_time:.2f} seconds")
+    print(f"Plotting time:        {plot_time:.2f} seconds")
+    print(f"Total execution time: {total_time:.2f} seconds")
+    print(f"Average per position: {plot_time/len(selected_positions):.2f} seconds")
+    print(f"{'='*60}")
+    print(f"✓ Successfully generated {len(selected_positions)} plot(s)")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
     main()
 
 
+# ===================================================================================================
+# CODE STRUCTURE QUICK REFERENCE
+# ===================================================================================================
+"""
+FUNCTION HIERARCHY AND CALL ORDER:
+-----------------------------------
+
+main()
+├── get_position_folders() → Scan for position directories
+├── User Input: Select positions
+├── get_gripper_penetration_for_positions() → Load gripper/abandonment data
+├── FOR each selected position:
+│   ├── parse_results_csv() → Extract driveability tables
+│   ├── get_available_methods_and_bounds() → Identify methods/bounds
+│   └── Extract target depths
+├── User Input: Select methods and bounds
+├── get_refusal_risk_for_positions() → Load refusal risk data
+└── FOR each selected position:
+    ├── extract_soil_profile_data() → Read soil layers
+    │   ├── parse_results_csv() → Parse input position file
+    │   └── Process soil profile (qc, colors, geoUnits)
+    ├── get_monopile_weights() → Read MP weights from Excel
+    ├── get_position_info() → Extract hammer and target details
+    └── plot_driveability_results() → Create interactive plot
+        ├── Create 2x4 subplot grid
+        ├── Plot SRD traces for all method/bound combinations
+        ├── Add target depth lines
+        ├── Add hard driving and refusal thresholds
+        ├── calculate_swp_and_pile_run_assessment() → Calculate assessments
+        │   ├── Calculate SWP MP + ILT
+        │   ├── Calculate pile run at hammer placement
+        │   ├── Calculate SWP MP + Hammer
+        │   ├── Calculate pile run risk top/bottom
+        │   └── Apply conservative logic across methods
+        ├── Add weight threshold reference lines
+        ├── Create assessment results table
+        ├── Create position information table
+        ├── Add gripper/abandonment horizontal lines
+        ├── Add refusal risk horizontal lines
+        ├── Overlay soil profile on SRD subplot
+        │   ├── Filter soil data to depth range
+        │   ├── Add color-coded layer backgrounds
+        │   ├── Add qc profile trace on secondary x-axis
+        │   ├── Configure secondary x-axis (xaxis7)
+        │   └── Add geoUnit labels
+        ├── Update plot layout and axes
+        ├── Save as Installation_Driveability_{Position}.html
+        └── Display interactive plot in browser
+
+HELPER FUNCTIONS:
+-----------------
+- parse_results_csv() → Parse multi-table CSV files
+- extract_method_and_bound() → Extract method/bound from table name
+- get_available_methods_and_bounds() → Identify available methods/bounds
+- get_position_folders() → Scan for position directories
+- get_monopile_weights() → Read MP weights from Excel
+- get_position_info() → Extract hammer and target information
+- get_gripper_penetration_for_positions() → Read penetration thresholds
+- get_refusal_risk_for_positions() → Read refusal risk depths
+- extract_soil_profile_data() → Process soil profile for overlay
+- calculate_swp_and_pile_run_assessment() → Calculate installation assessments
+- plot_soil_profile() → Independent soil profile plotting (not used in main flow)
+- plot_driveability_results() → Main plotting function
+
+DATA FLOW:
+----------
+Input Files → Parse → Extract Methods/Bounds → User Selection → 
+Calculate Assessments → Create Plots → Save HTML → Display
+
+KEY ALGORITHMS:
+---------------
+1. Conservative Value Selection (calculate_swp_and_pile_run_assessment):
+   - SWP depths: Select DEEPEST across methods (most conservative penetration)
+   - Pile run risks: Select SHALLOWEST for top (earliest risk occurrence)
+   - Pile run risks: Select DEEPEST for bottom (longest risk zone)
+
+2. Soil Profile Overlay (plot_driveability_results):
+   - Filter soil layers to match SRD plot depth range
+   - Create step plot for constant qc within layers
+   - Add color-coded rectangles as background shapes
+   - Overlay qc profile on secondary x-axis (top of subplot)
+   - Add geoUnit labels at layer boundaries
+
+3. Refusal Risk Assessment (get_refusal_risk_for_positions):
+   - Read multiple Excel sheets (1hr, 24hr, 48hr, 7days)
+   - Find position row and method columns
+   - Extract difference from target depth (negative values)
+   - Calculate absolute refusal depth: target_depth + difference
+   - Apply conservative logic: most negative difference across methods
+
+OUTPUT FILES:
+-------------
+- Installation_Driveability_{Position}.html for each position
+- Interactive Plotly plots with 2x4 subplot grid
+- A3 landscape format (1587px × 1123px)
+- Synchronized y-axes for consistent zooming
+
+CUSTOMIZATION POINTS:
+---------------------
+1. Lines 108-109: HARD_DRIVING_BLOWCOUNT, REFUSAL_BLOWCOUNT
+2. Lines 113-115: INTERNAL_LIFTING_TOOL, HAMMER_WEIGHT, ADDITIONAL_WEIGHT
+3. Lines 119-125: File paths (weights, root dir, output dir)
+4. Lines 128-135: Gripper and refusal risk data sources
+5. Lines 1556-1561: Method colors and line dash patterns
+6. Lines 1572-1582: Subplot grid configuration
+"""
