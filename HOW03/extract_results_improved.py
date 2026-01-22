@@ -3,90 +3,43 @@
 PILE DRIVEABILITY ANALYSIS - INTERACTIVE PLOTTING TOOL
 ===================================================================================================
 
-PURPOSE:
---------
-This script extracts, processes, and visualizes pile driving analysis results for offshore wind
-turbine monopile installations. It creates comprehensive interactive plots showing Static Resistance
-to Driving (SRD), blowcount rates, energy requirements, and driveability assessment metrics.
+Processes pile driving analysis results and generates:
+- Interactive HTML plots with SRD, blowcount, energy, and soil profile overlays
+- Excel summary file with pile run assessment results for all positions
 
-EXECUTION ORDER:
-----------------
-1. USER CONFIGURATION
-   - Set threshold values (hard driving, refusal blowcount rates)
-   - Define file paths (monopile weights, root directory, output directory)
-   - Configure gripper penetration and refusal risk data sources
+For detailed documentation, usage instructions, and troubleshooting, see README.md
 
-2. DATA COLLECTION PHASE (main function)
-   a) Scan position folders (A01, A02, etc.) in the monopile root directory
-   b) Prompt user to select positions to analyze (or 'all')
-   c) Load gripper penetration data for selected positions only (optimization)
-   d) Parse driveability CSV files for selected positions:
-      - Extract multiple tables from each results_PileDrivingAnalysis-{Position}.csv
-      - Identify available SRD methods (MD, MY, AH) and soil bounds (lb, be, ub)
-      - Extract target penetration depths for refusal risk calculations
-   e) Prompt user to select SRD methods and soil bounds to plot
-   f) Load refusal risk assessment data from Excel file (1hr, 24hr, 48hr, 7days pause durations)
-
-3. POSITION PROCESSING LOOP
-   For each selected position:
-   a) Extract soil profile data from input_Position_{Position}.csv file:
-      - Read soil layers with qc values, colors, and geoUnit classifications
-      - Calculate depth below seabed using zSeabed reference
-      - Prepare step plot data for qc profile overlay
-
-   b) Call plot_driveability_results() which:
-      - Creates 2x4 subplot grid (3 plots per row + 1 table per row)
-      - Row 1: SRD [MN], Blowcount Rate, Input Energy, Info Table
-      - Row 2: Total Energy [GJ], Cumulative Blows, SRD [kN] (log scale), Assessment Table
-      - Plots all selected method/bound combinations with color-coded traces
-      - Overlays soil profile (qc, layers, geoUnits) on SRD subplot
-      - Adds target depth line, hard driving thresholds, refusal criteria
-      - Adds horizontal lines for gripper release and MP abandonment depths
-      - Adds horizontal lines for refusal risk depths (1hr, 24hr, 48hr, 7days)
-
-   c) Calculate self-weight penetration and pile run assessments:
-      - SWP MP + ILT (Internal Lifting Tool): Depth where SRD = MP + ILT weight
-      - Pile run at hammer placement: Check if SRD < threshold at hammer placement
-      - SWP MP + Hammer: Depth where SRD = MP + Hammer weight
-      - Pile run risk top: First depth where SRD drops below hammer weight (risk initiation)
-      - Pile run risk bottom: Depth where SRD recovers above threshold (risk zone end)
-      - CONSERVATIVE LOGIC: When multiple methods selected, use most conservative value
-        * SWP depths: DEEPEST (pile penetrates furthest)
-        * Pile run risks: SHALLOWEST for top (earliest risk), DEEPEST for bottom (longest zone)
-
-   d) Populate information table with:
-      - Position name, monopile weight, target depth, hammer details
-      - Minimum penetrations for gripper release and MP abandonment
-      - Refusal risk depths for different installation pause durations
-
-   e) Save plot as: Installation_Driveability_{Position}.html
-   f) Display interactive plot in browser
+QUICK START:
+-----------
+1. Configure file paths in USER CONFIGURABLE CONSTANTS section (lines 115-150)
+2. Run: python extract_results_improved.py
+3. Follow prompts to select positions, methods, and bounds
+4. Review output files in PLOTS_OUTPUT_DIR
 
 KEY FEATURES:
--------------
-- Multi-method comparison: Compare MD (MonoDrive), MY (Maynard), AH (Alm & Hamre)
-- Multi-bound analysis: Lower bound (lb), Best estimate (be), Upper bound (ub)
-- Synchronized y-axes: All subplots zoom together for easy comparison
-- Soil profile overlay: qc profile with color-coded layers and geoUnit labels on SRD plot
-- Conservative assessments: Automatic selection of most conservative values across methods
-- Installation risk indicators: Gripper release, MP abandonment, refusal risk depths
-- Professional formatting: A3 landscape layout optimized for printing/reporting
-- Interactive tooltips: Hover over any point to see exact values
-- Robust error handling: Graceful degradation if optional data sources unavailable
+------------
+- Multi-method comparison (MD, MY, AH) with conservative value selection
+- Soil profile overlay with color-coded layers and geoUnit labels
+- Self-weight penetration and pile run risk assessments
+- Installation risk markers (gripper, abandonment, refusal depths)
+- Excel export with proper numeric types (not text)
+- Performance optimized: cached parsing, fast soil extraction (5-10x faster)
 
-DATA SOURCES:
--------------
-- Driveability results: results_PileDrivingAnalysis-{Position}.csv (multi-table CSV)
-- Soil profiles: input_Position_*_{Position}.csv (qc, layers, geoUnits)
-- Monopile weights: Excel file from primary steel design verification
-- Gripper penetration: Excel workbook from lateral pile stability analysis
-- Refusal risk: Excel workbook with pause duration scenarios (1hr to 7days)
+INPUT FILES:
+-----------
+- results_PileDrivingAnalysis-{Position}.csv (driveability data)
+- input_Position_*_{Position}.csv (soil profile)
+- summary-01_Primary_Steel_Design_Verification_25yr.xls (monopile weights)
+- HOW03_minL_load_iter3.xlsm (gripper penetration limits)
+- Data_Summary_setup.xlsx (refusal risk depths)
 
-OUTPUT:
--------
-- Interactive HTML plots: Installation_Driveability_{Position}.html
-- Console output: Progress messages, warnings, loaded data summary
-- Plot display: Automatic browser opening for immediate review
+OUTPUT FILES:
+------------
+- Installation_Driveability_{Position}.html (interactive plots)
+- summary_pile_run.xlsx (pile run assessment summary)
+
+For complete technical documentation, algorithm descriptions, and function references,
+see README.md in this directory.
 """
 
 import pandas as pd
@@ -2587,8 +2540,11 @@ def plot_driveability_results(tables: Dict[str, pd.DataFrame], position: str,
     if output_dir:
         print(f"  [4/4] Saving plot to file...")
         output_path = output_dir / f'Installation_Driveability_{position}.html'
-        fig.write_html(str(output_path))
+        #output_path_png = output_dir / f'Installation_Driveability_{position}.png'
+        fig.write_html(str(output_path),include_plotlyjs='cdn')
         print(f"        ✓ Saved: {output_path}")
+        #fig.write_image(str(output_path_png), engine="kaleido")
+        # print(f"        ✓ Saved: {output_path_png}")
 
     # Open interactive plot in default browser for immediate review (optional)
     if show_plot:
@@ -3155,108 +3111,17 @@ if __name__ == "__main__":
 
 
 # ===================================================================================================
-# CODE STRUCTURE QUICK REFERENCE
+# DOCUMENTATION
 # ===================================================================================================
 """
-FUNCTION HIERARCHY AND CALL ORDER:
------------------------------------
+- For complete documentation including:
+- Detailed usage instructions and examples
+- Function hierarchy and call order
+- Algorithm descriptions and technical details
+- Data structure definitions
+- Troubleshooting guide
+- Configuration options
 
-main()
-├── get_position_folders() → Scan for position directories
-├── User Input: Select positions
-├── get_gripper_penetration_for_positions() → Load gripper/abandonment data
-├── FOR each selected position:
-│   ├── parse_results_csv() → Extract driveability tables
-│   ├── get_available_methods_and_bounds() → Identify methods/bounds
-│   └── Extract target depths
-├── User Input: Select methods and bounds
-├── get_refusal_risk_for_positions() → Load refusal risk data
-└── FOR each selected position:
-    ├── extract_soil_profile_data() → Read soil layers
-    │   ├── parse_results_csv() → Parse input position file
-    │   └── Process soil profile (qc, colors, geoUnits)
-    ├── get_monopile_weights() → Read MP weights from Excel
-    ├── get_position_info() → Extract hammer and target details
-    └── plot_driveability_results() → Create interactive plot
-        ├── Create 2x4 subplot grid
-        ├── Plot SRD traces for all method/bound combinations
-        ├── Add target depth lines
-        ├── Add hard driving and refusal thresholds
-        ├── calculate_swp_and_pile_run_assessment() → Calculate assessments
-        │   ├── Calculate SWP MP + ILT
-        │   ├── Calculate pile run at hammer placement
-        │   ├── Calculate SWP MP + Hammer
-        │   ├── Calculate pile run risk top/bottom
-        │   └── Apply conservative logic across methods
-        ├── Add weight threshold reference lines
-        ├── Create assessment results table
-        ├── Create position information table
-        ├── Add gripper/abandonment horizontal lines
-        ├── Add refusal risk horizontal lines
-        ├── Overlay soil profile on SRD subplot
-        │   ├── Filter soil data to depth range
-        │   ├── Add color-coded layer backgrounds
-        │   ├── Add qc profile trace on secondary x-axis
-        │   ├── Configure secondary x-axis (xaxis7)
-        │   └── Add geoUnit labels
-        ├── Update plot layout and axes
-        ├── Save as Installation_Driveability_{Position}.html
-        └── Display interactive plot in browser
-
-HELPER FUNCTIONS:
------------------
-- parse_results_csv() → Parse multi-table CSV files
-- extract_method_and_bound() → Extract method/bound from table name
-- get_available_methods_and_bounds() → Identify available methods/bounds
-- get_position_folders() → Scan for position directories
-- get_monopile_weights() → Read MP weights from Excel
-- get_position_info() → Extract hammer and target information
-- get_gripper_penetration_for_positions() → Read penetration thresholds
-- get_refusal_risk_for_positions() → Read refusal risk depths
-- extract_soil_profile_data() → Process soil profile for overlay
-- calculate_swp_and_pile_run_assessment() → Calculate installation assessments
-- plot_soil_profile() → Independent soil profile plotting (not used in main flow)
-- plot_driveability_results() → Main plotting function
-
-DATA FLOW:
-----------
-Input Files → Parse → Extract Methods/Bounds → User Selection → 
-Calculate Assessments → Create Plots → Save HTML → Display
-
-KEY ALGORITHMS:
----------------
-1. Conservative Value Selection (calculate_swp_and_pile_run_assessment):
-   - SWP depths: Select DEEPEST across methods (most conservative penetration)
-   - Pile run risks: Select SHALLOWEST for top (earliest risk occurrence)
-   - Pile run risks: Select DEEPEST for bottom (longest risk zone)
-
-2. Soil Profile Overlay (plot_driveability_results):
-   - Filter soil layers to match SRD plot depth range
-   - Create step plot for constant qc within layers
-   - Add color-coded rectangles as background shapes
-   - Overlay qc profile on secondary x-axis (top of subplot)
-   - Add geoUnit labels at layer boundaries
-
-3. Refusal Risk Assessment (get_refusal_risk_for_positions):
-   - Read multiple Excel sheets (1hr, 24hr, 48hr, 7days)
-   - Find position row and method columns
-   - Extract difference from target depth (negative values)
-   - Calculate absolute refusal depth: target_depth + difference
-   - Apply conservative logic: most negative difference across methods
-
-OUTPUT FILES:
--------------
-- Installation_Driveability_{Position}.html for each position
-- Interactive Plotly plots with 2x4 subplot grid
-- A3 landscape format (1587px × 1123px)
-- Synchronized y-axes for consistent zooming
-
-CUSTOMIZATION POINTS:
----------------------
-1. Lines 108-109: HARD_DRIVING_BLOWCOUNT, REFUSAL_BLOWCOUNT
-2. Lines 113-115: INTERNAL_LIFTING_TOOL, HAMMER_WEIGHT, ADDITIONAL_WEIGHT
-3. Lines 119-125: File paths (weights, root dir, output dir)
-4. Lines 128-135: Gripper and refusal risk data sources
-5. Lines 1556-1561: Method colors and line dash patterns
-6. Lines 1572-1582: Subplot grid configuration
+See README.md in this directory.
 """
+
